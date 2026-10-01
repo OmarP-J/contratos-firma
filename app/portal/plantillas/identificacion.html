@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block titulo %}Identificate para firmar{% endblock %}
+{% block contenido %}
+<div class="tarjeta">
+  <h1>{{ contrato.titulo }}</h1>
+  <p class="sutil">Hola {{ parte.nombre }}. Para ver y firmar este documento necesitamos
+  confirmar que eres tu.</p>
+
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+  {% if not enviado %}
+    <p>Te enviaremos un codigo de un solo uso al contacto registrado en el contrato.</p>
+    <form method="post" action="/firma/{{ token }}/codigo">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit">Enviarme el codigo</button>
+    </form>
+  {% else %}
+    <div class="aviso">Enviamos un codigo a <strong>{{ destino }}</strong>.
+    Vence en pocos minutos.</div>
+    <form method="post" action="/firma/{{ token }}/verificar">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label for="codigo">Codigo recibido</label>
+      <input id="codigo" name="codigo" type="text" inputmode="numeric" autocomplete="one-time-code"
+             maxlength="6" required autofocus>
+      <p></p>
+      <button type="submit">Verificar</button>
+    </form>
+    <form method="post" action="/firma/{{ token }}/codigo" style="margin-top:.8rem">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit" class="secundario">Enviar otro codigo</button>
+    </form>
+  {% endif %}
+</div>
+{% endblock %}
