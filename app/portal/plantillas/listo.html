@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block titulo %}Firma registrada{% endblock %}
+{% block contenido %}
+<div class="tarjeta">
+  <h1>Listo, {{ parte.nombre }}</h1>
+  <div class="ok">Tu firma quedo registrada correctamente.</div>
+  <dl class="datos">
+    <dt>Documento</dt><dd>{{ contrato.titulo }}</dd>
+    <dt>Estado del contrato</dt><dd>{{ contrato.estado }}</dd>
+    <dt>Identificador</dt><dd>{{ contrato.id }}</dd>
+  </dl>
+  <p class="sutil" style="margin-top:1.2rem">
+    {% if contrato.estado == 'COMPLETADO' %}
+      Todas las partes han firmado. El documento final, con su constancia de firma, ya esta
+      disponible para la empresa.
+    {% else %}
+      Falta la firma de la otra parte. Cuando se complete, el documento final se emitira
+      automaticamente.
+    {% endif %}
+  </p>
+</div>
+{% endblock %}

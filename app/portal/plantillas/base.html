@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block titulo %}Firma electronica{% endblock %}</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #f4f4f7; color: #16171d; line-height: 1.6;
+         font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .marco { max-width: 46rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+  .tarjeta { background: #fff; border: 1px solid #e2e2ea; border-radius: 10px;
+             padding: 1.5rem; margin-bottom: 1.25rem; }
+  h1 { font-size: 1.45rem; margin: 0 0 .3rem; }
+  h2 { font-size: 1.05rem; margin: 0 0 .8rem; }
+  .sutil { color: #5e6070; font-size: .9rem; margin: 0 0 1.2rem; }
+  label { display: block; font-weight: 600; margin-bottom: .35rem; font-size: .92rem; }
+  input[type=text], input[type=tel] { width: 100%; padding: .7rem .8rem; font-size: 1.1rem;
+      border: 1px solid #c4c4d0; border-radius: 6px; letter-spacing: .25em; font-family: inherit; }
+  button { background: #2f3f96; color: #fff; border: 0; border-radius: 6px;
+           padding: .75rem 1.3rem; font-size: 1rem; font-weight: 600; cursor: pointer; }
+  button:hover { background: #26337c; }
+  button[disabled] { background: #9a9ab0; cursor: not-allowed; }
+  .secundario { background: transparent; color: #2f3f96; border: 1px solid #c4c4d0; }
+  .error { background: #fdeaea; border-left: 3px solid #b3261e; padding: .8rem 1rem;
+           border-radius: 4px; margin-bottom: 1rem; font-size: .92rem; }
+  .aviso { background: #eef1fb; border-left: 3px solid #2f3f96; padding: .8rem 1rem;
+           border-radius: 4px; margin-bottom: 1rem; font-size: .92rem; }
+  .ok { background: #e7f4ee; border-left: 3px solid #1c7a5b; padding: .8rem 1rem;
+        border-radius: 4px; margin-bottom: 1rem; }
+  iframe { width: 100%; height: 26rem; border: 1px solid #d8d8e2; border-radius: 6px;
+           background: #fff; }
+  .consentimiento { display: flex; gap: .6rem; align-items: flex-start; margin: 1.2rem 0;
+                    font-size: .95rem; font-weight: 400; }
+  .consentimiento input { margin-top: .3rem; }
+  .pie { color: #71738a; font-size: .8rem; margin-top: 2rem; text-align: center; }
+  dl.datos { display: grid; grid-template-columns: auto 1fr; gap: .3rem 1rem;
+             font-size: .9rem; margin: 0; }
+  dl.datos dt { color: #5e6070; }
+  dl.datos dd { margin: 0; }
+</style>
+</head>
+<body>
+  <div class="marco">
+    {% block contenido %}{% endblock %}
+    <p class="pie">Firma electronica conforme a la Ley 126-02 sobre Comercio Electronico,
+    Documentos y Firmas Digitales de la Republica Dominicana.</p>
+  </div>
+</body>
+</html>

@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block titulo %}Revisa y firma{% endblock %}
+{% block contenido %}
+<div class="tarjeta">
+  <h1>{{ contrato.titulo }}</h1>
+  <p class="sutil">Lee el documento completo antes de firmar. Lo que firmas es exactamente
+  lo que ves aqui.</p>
+
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+  <iframe src="/firma/{{ token }}/contrato.html" sandbox title="Documento del contrato"></iframe>
+</div>
+
+<div class="tarjeta">
+  <h2>Firmar como {{ parte.nombre }}</h2>
+
+  {% if politica.requiere_geolocalizacion %}
+    <div class="aviso" id="aviso-ubicacion">Este contrato requiere que compartas tu ubicacion.
+    Tu navegador te lo va a preguntar.</div>
+  {% endif %}
+
+  <form method="post" action="/firma/{{ token }}/firmar" id="formulario-firma">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="latitud" id="latitud">
+    <input type="hidden" name="longitud" id="longitud">
+    <input type="hidden" name="precision" id="precision">
+
+    <label class="consentimiento">
+      <input type="checkbox" name="acepto" value="si" required>
+      <span>Acepto el uso de firma electronica y declaro haber leido y entendido el contenido
+      integro de este documento. Entiendo que mi firma electronica tiene el mismo valor que
+      mi firma manuscrita.</span>
+    </label>
+
+    <button type="submit" id="boton-firmar">Firmar documento</button>
+  </form>
+</div>
+
+<script nonce="{{ nonce }}">
+  (function () {
+    "use strict";
+    var exigeUbicacion = {{ 'true' if politica.requiere_geolocalizacion else 'false' }};
+    if (!exigeUbicacion || !navigator.geolocation) return;
+
+    var boton = document.getElementById("boton-firmar");
+    var aviso = document.getElementById("aviso-ubicacion");
+    boton.disabled = true;
+
+    navigator.geolocation.getCurrentPosition(
+      function (posicion) {
+        document.getElementById("latitud").value = posicion.coords.latitude;
+        document.getElementById("longitud").value = posicion.coords.longitude;
+        document.getElementById("precision").value = posicion.coords.accuracy;
+        aviso.textContent = "Ubicacion capturada. Ya puedes firmar.";
+        boton.disabled = false;
+      },
+      function () {
+        aviso.textContent =
+          "No se pudo obtener tu ubicacion y este contrato la exige. " +
+          "Permite el acceso en tu navegador y recarga la pagina.";
+        boton.disabled = true;
+      },
+      { enableHighAccuracy: true, timeout: 15000 }
+    );
+  })();
+</script>
+{% endblock %}
