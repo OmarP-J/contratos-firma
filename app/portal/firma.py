@@ -84,6 +84,13 @@ def resolver_acceso(
         raise _error("Este enlace no es valido.", status.HTTP_404_NOT_FOUND)
     if contrato.estado not in {"PENDIENTE_CLIENTE", "PENDIENTE_EMPRESA"}:
         raise _error("Este contrato ya no admite firmas.")
+    if servicio.esta_vencido(contrato):
+        # La tarea periodica puede no haber pasado todavia. El vencimiento se
+        # aplica igual en cuanto alguien intenta usar el enlace.
+        servicio.vencer(sesion, contrato)
+        sesion.commit()
+        webhooks.procesar_pendientes()
+        raise _error("Este contrato ya vencio.")
 
     sesion_firma = sesion.scalars(
         select(SesionFirma)
