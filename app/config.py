@@ -30,6 +30,16 @@ class Ajustes(BaseSettings):
     permitir_webhook_privado: bool = False
     mostrar_secretos_en_log: bool = True
 
+    # Correo saliente: consola (desarrollo) o smtp.
+    proveedor_correo: str = "consola"
+    smtp_host: str = ""
+    smtp_puerto: int = 587
+    smtp_usuario: str = ""
+    smtp_clave: str = ""
+    smtp_remitente: str = ""
+    # starttls (puerto 587), ssl (puerto 465) o ninguno (solo para pruebas locales).
+    smtp_tls: str = "starttls"
+
     # Proxies de confianza para aceptar la cabecera X-Forwarded-For.
     proxies_confiables: str = ""
 
@@ -52,4 +62,6 @@ def ajustes() -> Ajustes:
             raise RuntimeError("CLAVE_APP debe ser una clave real de 32 bytes en produccion")
         if config.mostrar_secretos_en_log:
             raise RuntimeError("MOSTRAR_SECRETOS_EN_LOG no puede estar activo en produccion")
+        if config.proveedor_correo == "consola":
+            raise RuntimeError("En produccion los codigos tienen que salir: PROVEEDOR_CORREO=smtp")
     return config
