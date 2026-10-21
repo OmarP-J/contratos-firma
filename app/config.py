@@ -53,6 +53,10 @@ class Ajustes(BaseSettings):
     # Proxies de confianza para aceptar la cabecera X-Forwarded-For.
     proxies_confiables: str = ""
 
+    # Vacia -> limites de peticiones en memoria (una sola instancia).
+    # Con valor (redis://host:6379/0) -> limites compartidos entre instancias.
+    url_redis: str = ""
+
     @property
     def es_produccion(self) -> bool:
         return self.entorno == "produccion"
