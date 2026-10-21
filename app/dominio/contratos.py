@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import notificaciones
 from app.almacenamiento import almacen, nueva_clave
 from app.config import ajustes
 from app.db import ahora_utc
@@ -34,6 +35,7 @@ from app.models import (
     Firma,
     SesionFirma,
 )
+from app.notificaciones import Mensaje
 from app.seguridad import hash_de_token, json_canonico, sha256, token_aleatorio
 
 
@@ -292,6 +294,11 @@ def enviar(sesion: Session, ctx: Contexto, contrato: Contrato) -> str:
         expira_en=ahora_utc() + timedelta(minutes=ajustes().minutos_invitacion),
     )
     sesion.add(invitacion)
+    url = url_de_firma(token)
+
+    aviso = None
+    if (contrato.politica or {}).get("notificar_invitaciones", True):
+        aviso = _avisar_invitacion(sesion, contrato, parte, url, invitacion.expira_en)
 
     auditoria.registrar(
         sesion,
@@ -300,7 +307,7 @@ def enviar(sesion: Session, ctx: Contexto, contrato: Contrato) -> str:
         tipo="INVITACION_CREADA",
         actor_tipo=ctx.actor_tipo,
         actor_id=ctx.actor_id,
-        datos={"parte": parte.id, "rol": parte.rol},
+        datos={"parte": parte.id, "rol": parte.rol, "aviso": aviso},
         ip=ctx.ip,
         agente=ctx.agente,
     )
@@ -317,11 +324,49 @@ def enviar(sesion: Session, ctx: Contexto, contrato: Contrato) -> str:
             },
         )
     sesion.flush()
-    return url_de_firma(token)
+    return url
 
 
 def url_de_firma(token: str) -> str:
     return f"{ajustes().url_publica.rstrip('/')}/firma/{token}"
+
+
+def _avisar_invitacion(
+    sesion: Session, contrato: Contrato, parte: ParteContrato, url: str, expira_en
+) -> str | None:
+    """
+    Le manda el enlace al firmante y devuelve por que canal.
+
+    El enlace del representante de la empresa se crea en el momento en que
+    firma el cliente; sin este aviso solo podria recuperarse reenviando por la
+    API. El mensaje sale cuando la transaccion se confirma, no antes.
+    """
+    if parte.email:
+        canal, destino = "EMAIL", parte.email
+    elif parte.telefono:
+        canal, destino = "SMS", parte.telefono
+    else:
+        return None
+
+    tenant = sesion.get(Tenant, contrato.tenant_id)
+    emisor = tenant.nombre if tenant else "La empresa"
+    vence = expira_en.strftime("%d/%m/%Y %H:%M UTC")
+    if canal == "SMS":
+        texto = f"{emisor} te envio un documento para firmar: {url} (vence el {vence})"
+    else:
+        texto = (
+            f"Hola {parte.nombre}:\n\n"
+            f"{emisor} te envio \"{contrato.titulo}\" para que lo revises y lo firmes "
+            f"electronicamente.\n\n{url}\n\n"
+            f"El enlace es personal y vence el {vence}. Si no esperabas este mensaje, "
+            "ignoralo."
+        )
+    notificaciones.enviar_al_confirmar(
+        sesion,
+        Mensaje(canal=canal, destino=destino,
+                asunto=f"Documento para firmar: {contrato.titulo}", texto=texto),
+    )
+    return canal
 
 
 # ---------------------------------------------------------------------------
