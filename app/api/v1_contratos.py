@@ -13,6 +13,7 @@ from fastapi import (
     Depends,
     Header,
     HTTPException,
+    Query,
     Request,
     Response,
     status,
@@ -28,7 +29,7 @@ from app.dependencias import (
     ip_observada,
     limitar,
 )
-from app.dominio import auditoria, contratos as servicio, webhooks
+from app.dominio import auditoria, contratos as servicio, documentos, webhooks
 from app.dominio.contratos import ErrorDeNegocio, NoEncontrado
 from app.dominio.estados import TransicionInvalida
 from app.dominio.plantillas import PlantillaInvalida, sanitizar_cuerpo
@@ -281,6 +282,98 @@ def registrar_webhook(
         # El secreto se muestra UNA sola vez. Despues solo existe cifrado.
         "secret": secreto,
     }
+
+
+def _endpoint_json(endpoint) -> dict:
+    # Sin el secreto: solo se muestra al registrar.
+    return {
+        "endpoint_id": endpoint.id,
+        "url": endpoint.url,
+        "events": endpoint.eventos,
+        "status": endpoint.estado,
+        "consecutive_failures": endpoint.fallos_consecutivos,
+        "created_at": documentos.iso(endpoint.creado_en),
+    }
+
+
+def _entrega_json(entrega) -> dict:
+    return {
+        "delivery_id": entrega.id,
+        "event": entrega.tipo_evento,
+        "event_id": entrega.evento_id,
+        "contract_id": entrega.contrato_id,
+        "status": entrega.estado,
+        "attempts": entrega.intentos,
+        "last_status_code": entrega.ultimo_codigo,
+        "last_error": entrega.ultimo_error,
+        "next_attempt_at": documentos.iso(entrega.proximo_intento_en),
+        "created_at": documentos.iso(entrega.creada_en),
+        "delivered_at": documentos.iso(entrega.entregada_en),
+    }
+
+
+def _endpoint_o_404(sesion: Session, tenant_id: str, endpoint_id: str):
+    endpoint = webhooks.obtener_endpoint(sesion, tenant_id, endpoint_id)
+    if endpoint is None:
+        raise NoEncontrado("Endpoint no encontrado")
+    return endpoint
+
+
+@router.get("/webhooks")
+def listar_webhooks(
+    credencial: CredencialAutenticada = Depends(exigir_permiso("contratos:leer")),
+    sesion: Session = Depends(obtener_sesion),
+):
+    return {"data": [_endpoint_json(e) for e in webhooks.listar_endpoints(sesion, credencial.tenant_id)]}
+
+
+@router.get("/webhooks/{endpoint_id}/entregas")
+def entregas_webhook(
+    endpoint_id: str,
+    limite: int = Query(default=50, ge=1, le=200),
+    credencial: CredencialAutenticada = Depends(exigir_permiso("contratos:leer")),
+    sesion: Session = Depends(obtener_sesion),
+):
+    """Historial de entregas, para que el integrador vea que le llego y que fallo."""
+    endpoint = _endpoint_o_404(sesion, credencial.tenant_id, endpoint_id)
+    entregas = webhooks.listar_entregas(sesion, credencial.tenant_id, endpoint.id, limite)
+    return {"endpoint": _endpoint_json(endpoint), "data": [_entrega_json(e) for e in entregas]}
+
+
+@router.post("/webhooks/{endpoint_id}/reactivar")
+def reactivar_webhook(
+    endpoint_id: str,
+    credencial: CredencialAutenticada = Depends(exigir_permiso("contratos:crear")),
+    sesion: Session = Depends(obtener_sesion),
+):
+    """Vuelve a activar un endpoint suspendido por fallos seguidos."""
+    endpoint = _endpoint_o_404(sesion, credencial.tenant_id, endpoint_id)
+    webhooks.reactivar(endpoint)
+    sesion.commit()
+    return _endpoint_json(endpoint)
+
+
+@router.post("/webhooks/entregas/{entrega_id}/reintentar", status_code=status.HTTP_202_ACCEPTED)
+def reintentar_entrega(
+    entrega_id: str,
+    tareas: BackgroundTasks,
+    credencial: CredencialAutenticada = Depends(exigir_permiso("contratos:crear")),
+    sesion: Session = Depends(obtener_sesion),
+):
+    entrega = webhooks.obtener_entrega(sesion, credencial.tenant_id, entrega_id)
+    if entrega is None:
+        raise NoEncontrado("Entrega no encontrada")
+    endpoint = _endpoint_o_404(sesion, credencial.tenant_id, entrega.endpoint_id)
+    try:
+        webhooks.reintentar(entrega, endpoint)
+    except webhooks.EstadoNoPermitido as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error": "estado_invalido", "mensaje": str(error)},
+        ) from error
+    sesion.commit()
+    tareas.add_task(webhooks.entregar_en_linea)
+    return _entrega_json(entrega)
 
 
 @router.post("/plantillas", status_code=status.HTTP_201_CREATED)

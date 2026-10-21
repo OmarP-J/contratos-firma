@@ -50,9 +50,17 @@ TIMEOUT_SEGUNDOS = 8.0
 ESTADOS_RECLAMABLES = ("PENDIENTE", "EN_CURSO")
 RESERVA = timedelta(seconds=TIMEOUT_SEGUNDOS * 4)
 
+# Fallos seguidos, entre todas sus entregas, a partir de los cuales un
+# endpoint se suspende y deja de recibir eventos nuevos.
+FALLOS_PARA_SUSPENDER = 15
+
 
 class DestinoNoPermitido(Exception):
     pass
+
+
+class EstadoNoPermitido(Exception):
+    """La operacion no tiene sentido en el estado actual del endpoint o la entrega."""
 
 
 def validar_destino(url: str) -> list[str]:
@@ -299,6 +307,75 @@ def _fallo(
     entrega.ultimo_codigo = codigo
     entrega.proximo_intento_en = ahora_utc() + _espera(intento)
     endpoint.fallos_consecutivos += 1
+    if endpoint.fallos_consecutivos >= FALLOS_PARA_SUSPENDER and endpoint.estado == "ACTIVO":
+        # Un endpoint que lleva tanto tiempo fallando solo acumula reintentos
+        # inutiles. Se suspende y el integrador lo reactiva cuando lo arregle.
+        endpoint.estado = "SUSPENDIDO"
+
+
+# ---------------------------------------------------------------------------
+# Gestion por parte del integrador
+# ---------------------------------------------------------------------------
+
+def listar_endpoints(sesion: Session, tenant_id: str) -> list[EndpointWebhook]:
+    return list(
+        sesion.scalars(
+            select(EndpointWebhook)
+            .where(EndpointWebhook.tenant_id == tenant_id)
+            .order_by(EndpointWebhook.creado_en)
+        )
+    )
+
+
+def obtener_endpoint(sesion: Session, tenant_id: str, endpoint_id: str) -> EndpointWebhook | None:
+    return sesion.scalars(
+        select(EndpointWebhook).where(
+            EndpointWebhook.tenant_id == tenant_id, EndpointWebhook.id == endpoint_id
+        )
+    ).first()
+
+
+def listar_entregas(
+    sesion: Session, tenant_id: str, endpoint_id: str, limite: int = 50
+) -> list[EntregaWebhook]:
+    return list(
+        sesion.scalars(
+            select(EntregaWebhook)
+            .where(
+                EntregaWebhook.tenant_id == tenant_id,
+                EntregaWebhook.endpoint_id == endpoint_id,
+            )
+            .order_by(EntregaWebhook.creada_en.desc())
+            .limit(limite)
+        )
+    )
+
+
+def obtener_entrega(sesion: Session, tenant_id: str, entrega_id: str) -> EntregaWebhook | None:
+    return sesion.scalars(
+        select(EntregaWebhook).where(
+            EntregaWebhook.tenant_id == tenant_id, EntregaWebhook.id == entrega_id
+        )
+    ).first()
+
+
+def reactivar(endpoint: EndpointWebhook) -> None:
+    endpoint.estado = "ACTIVO"
+    endpoint.fallos_consecutivos = 0
+
+
+def reintentar(entrega: EntregaWebhook, endpoint: EndpointWebhook) -> None:
+    """
+    Vuelve a poner una entrega en la cola, aunque ya se hubiera entregado:
+    sirve al integrador que perdio el evento de su lado. Si ya habia agotado
+    los reintentos, el reintento manual es uno solo.
+    """
+    if endpoint.estado != "ACTIVO":
+        raise EstadoNoPermitido("El endpoint esta suspendido: reactivalo antes de reintentar")
+    if entrega.estado == "EN_CURSO":
+        raise EstadoNoPermitido("La entrega se esta enviando en este momento")
+    entrega.estado = "PENDIENTE"
+    entrega.proximo_intento_en = ahora_utc()
 
 
 def firma_esperada(secreto: str, marca_tiempo: str, cuerpo: str) -> str:
