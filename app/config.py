@@ -40,6 +40,13 @@ class Ajustes(BaseSettings):
     # starttls (puerto 587), ssl (puerto 465) o ninguno (solo para pruebas locales).
     smtp_tls: str = "starttls"
 
+    # SMS saliente: consola (desarrollo), twilio o ninguno (sin canal SMS).
+    proveedor_sms: str = "consola"
+    twilio_cuenta: str = ""
+    twilio_token: str = ""
+    # Numero emisor en formato E.164 o un Messaging Service SID (empieza por MG).
+    twilio_remitente: str = ""
+
     # Proxies de confianza para aceptar la cabecera X-Forwarded-For.
     proxies_confiables: str = ""
 
@@ -64,4 +71,6 @@ def ajustes() -> Ajustes:
             raise RuntimeError("MOSTRAR_SECRETOS_EN_LOG no puede estar activo en produccion")
         if config.proveedor_correo == "consola":
             raise RuntimeError("En produccion los codigos tienen que salir: PROVEEDOR_CORREO=smtp")
+        if config.proveedor_sms == "consola":
+            raise RuntimeError("En produccion PROVEEDOR_SMS debe ser twilio o ninguno")
     return config

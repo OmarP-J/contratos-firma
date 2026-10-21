@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from email.message import EmailMessage
 from typing import Protocol, runtime_checkable
 
+import httpx
+
 from app.config import ajustes
 from app.seguridad import enmascarar
 
@@ -120,6 +122,76 @@ class CorreoSmtp:
             raise ErrorDeEnvio(f"SMTP: {error.__class__.__name__}") from error
 
 
+def a_e164(telefono: str) -> str:
+    """
+    Normaliza un telefono al formato internacional que exigen los proveedores.
+
+    Un numero de 10 digitos se toma como del plan de numeracion de Norteamerica,
+    que es el de la Republica Dominicana (809, 829, 849): 809-555-1234 pasa a
+    +18095551234. Lo que no se pueda interpretar con seguridad se rechaza en
+    vez de adivinar a quien mandarle un codigo.
+    """
+    crudo = telefono.strip()
+    digitos = "".join(c for c in crudo if c.isdigit())
+    if crudo.startswith("+") and 8 <= len(digitos) <= 15:
+        return f"+{digitos}"
+    if len(digitos) == 10:
+        return f"+1{digitos}"
+    if len(digitos) == 11 and digitos.startswith("1"):
+        return f"+{digitos}"
+    raise ValueError("Telefono en un formato que no se puede interpretar")
+
+
+class SmsTwilio:
+    """SMS por la API REST de Twilio."""
+
+    URL = "https://api.twilio.com/2010-04-01/Accounts/{cuenta}/Messages.json"
+
+    def __init__(
+        self, *, cuenta: str, token: str, remitente: str, timeout_s: float = 10.0,
+        transporte: httpx.BaseTransport | None = None,
+    ) -> None:
+        if not cuenta or not token or not remitente:
+            raise RuntimeError(
+                "TWILIO_CUENTA, TWILIO_TOKEN y TWILIO_REMITENTE son obligatorios con PROVEEDOR_SMS=twilio"
+            )
+        self.cuenta = cuenta
+        self.token = token
+        self.remitente = remitente
+        self.timeout_s = timeout_s
+        self.transporte = transporte
+
+    def enviar(self, mensaje: Mensaje) -> None:
+        try:
+            datos = {"To": a_e164(mensaje.destino), "Body": mensaje.texto}
+            # Un Messaging Service elige el numero emisor por su cuenta.
+            clave = "MessagingServiceSid" if self.remitente.startswith("MG") else "From"
+            datos[clave] = self.remitente
+            with httpx.Client(transport=self.transporte, timeout=self.timeout_s) as http:
+                respuesta = http.post(
+                    self.URL.format(cuenta=self.cuenta), data=datos, auth=(self.cuenta, self.token)
+                )
+        except (httpx.HTTPError, ValueError) as error:
+            registro.warning("fallo el envio SMS a %s: %r", enmascarar(mensaje.destino), error)
+            raise ErrorDeEnvio(f"SMS: {error.__class__.__name__}") from error
+        if not 200 <= respuesta.status_code < 300:
+            registro.warning(
+                "Twilio rechazo el SMS a %s: HTTP %s", enmascarar(mensaje.destino),
+                respuesta.status_code,
+            )
+            raise ErrorDeEnvio(f"SMS: HTTP {respuesta.status_code}")
+
+
+class SinCanal:
+    """Para despliegues sin SMS: falla de forma explicita en vez de callar."""
+
+    def __init__(self, canal: str) -> None:
+        self.canal = canal
+
+    def enviar(self, mensaje: Mensaje) -> None:
+        raise ErrorDeEnvio(f"No hay proveedor configurado para {self.canal}")
+
+
 class PorCanal:
     """Despacha cada mensaje al notificador de su canal."""
 
@@ -147,8 +219,23 @@ def _correo_configurado() -> Notificador:
     raise RuntimeError(f"PROVEEDOR_CORREO desconocido: {config.proveedor_correo}")
 
 
+def _sms_configurado() -> Notificador:
+    config = ajustes()
+    if config.proveedor_sms == "twilio":
+        return SmsTwilio(
+            cuenta=config.twilio_cuenta,
+            token=config.twilio_token,
+            remitente=config.twilio_remitente,
+        )
+    if config.proveedor_sms == "ninguno":
+        return SinCanal("SMS")
+    if config.proveedor_sms == "consola":
+        return NotificadorConsola()
+    raise RuntimeError(f"PROVEEDOR_SMS desconocido: {config.proveedor_sms}")
+
+
 def construir() -> Notificador:
-    return PorCanal(correo=_correo_configurado(), sms=NotificadorConsola())
+    return PorCanal(correo=_correo_configurado(), sms=_sms_configurado())
 
 
 _actual: Notificador = construir()
