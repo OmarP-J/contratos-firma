@@ -12,7 +12,16 @@ import secrets
 from datetime import timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
@@ -92,7 +101,7 @@ def resolver_acceso(
         # aplica igual en cuanto alguien intenta usar el enlace.
         servicio.vencer(sesion, contrato)
         sesion.commit()
-        webhooks.procesar_pendientes()
+        webhooks.entregar_en_linea()
         raise _error("Este contrato ya vencio.")
 
     sesion_firma = sesion.scalars(
@@ -159,7 +168,10 @@ def _base(request: Request, acceso: Acceso) -> dict:
 # ---------------------------------------------------------------------------
 
 @router.get("/{token}", response_class=HTMLResponse)
-def abrir(token: str, request: Request, sesion: Session = Depends(obtener_sesion)):
+def abrir(
+    token: str, request: Request, tareas: BackgroundTasks,
+    sesion: Session = Depends(obtener_sesion),
+):
     acceso = resolver_acceso(token, request, sesion)
     if acceso.invitacion.abierta_en is None:
         acceso.invitacion.abierta_en = ahora_utc()
@@ -181,6 +193,7 @@ def abrir(token: str, request: Request, sesion: Session = Depends(obtener_sesion
             datos={"status": acceso.contrato.estado,
                    "external_reference": acceso.contrato.referencia_externa},
         )
+        tareas.add_task(webhooks.entregar_en_linea)
     sesion.commit()
 
     if acceso.sesion_firma.autenticada or not (acceso.contrato.politica or {}).get("requiere_otp", True):
@@ -397,6 +410,7 @@ def contenido_contrato(token: str, request: Request, sesion: Session = Depends(o
 def firmar(
     token: str,
     request: Request,
+    tareas: BackgroundTasks,
     csrf: str = Form(default=""),
     acepto: str = Form(default=""),
     latitud: str = Form(default=""),
@@ -465,7 +479,7 @@ def firmar(
 
     acceso.invitacion.estado = "USADA"
     sesion.commit()
-    webhooks.procesar_pendientes()
+    tareas.add_task(webhooks.entregar_en_linea)
     return RedirectResponse(f"/firma/{token}/listo", status_code=303)
 
 
@@ -473,6 +487,7 @@ def firmar(
 def rechazar(
     token: str,
     request: Request,
+    tareas: BackgroundTasks,
     csrf: str = Form(default=""),
     motivo: str = Form(default=""),
     sesion: Session = Depends(obtener_sesion),
@@ -501,7 +516,7 @@ def rechazar(
         return plantillas.TemplateResponse(request, "documento.html", contexto, status_code=409)
 
     sesion.commit()
-    webhooks.procesar_pendientes()
+    tareas.add_task(webhooks.entregar_en_linea)
     return RedirectResponse(f"/firma/{token}/listo", status_code=303)
 
 

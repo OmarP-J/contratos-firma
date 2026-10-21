@@ -28,6 +28,9 @@ class Ajustes(BaseSettings):
     intentos_maximos_otp: int = 5
 
     permitir_webhook_privado: bool = False
+    # true: la API entrega los webhooks justo despues de responder.
+    # false: solo los entrega el proceso de tareas (python -m scripts.tareas).
+    entregar_webhooks_en_linea: bool = True
     mostrar_secretos_en_log: bool = True
 
     # Correo saliente: consola (desarrollo) o smtp.

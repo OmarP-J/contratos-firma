@@ -7,7 +7,16 @@ del lado de aca.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -37,6 +46,7 @@ def crear_contrato(
     peticion: CrearContrato,
     request: Request,
     response: Response,
+    tareas: BackgroundTasks,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     credencial: CredencialAutenticada = Depends(exigir_permiso("contratos:crear")),
     sesion: Session = Depends(obtener_sesion),
@@ -112,7 +122,7 @@ def crear_contrato(
             )
         )
     sesion.commit()
-    webhooks.procesar_pendientes()
+    tareas.add_task(webhooks.entregar_en_linea)
     return cuerpo
 
 
@@ -141,6 +151,7 @@ def anular_contrato(
     contrato_id: str,
     peticion: AnularContrato,
     request: Request,
+    tareas: BackgroundTasks,
     credencial: CredencialAutenticada = Depends(exigir_permiso("contratos:anular")),
     sesion: Session = Depends(obtener_sesion),
 ):
@@ -153,7 +164,7 @@ def anular_contrato(
             detail={"error": "estado_invalido", "mensaje": str(error)},
         ) from error
     sesion.commit()
-    webhooks.procesar_pendientes()
+    tareas.add_task(webhooks.entregar_en_linea)
     return servicio.como_json(sesion, contrato)
 
 
@@ -161,6 +172,7 @@ def anular_contrato(
 def reenviar_invitacion(
     contrato_id: str,
     request: Request,
+    tareas: BackgroundTasks,
     credencial: CredencialAutenticada = Depends(exigir_permiso("contratos:crear")),
     sesion: Session = Depends(obtener_sesion),
 ):
@@ -179,7 +191,7 @@ def reenviar_invitacion(
             detail={"error": "estado_invalido", "mensaje": str(error)},
         ) from error
     sesion.commit()
-    webhooks.procesar_pendientes()
+    tareas.add_task(webhooks.entregar_en_linea)
     cuerpo = servicio.como_json(sesion, contrato)
     cuerpo["signing_url"] = url
     return cuerpo

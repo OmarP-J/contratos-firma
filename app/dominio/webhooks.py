@@ -10,7 +10,9 @@ Tres cosas importan aqui:
    cuerpo, para que el receptor compruebe que viene de nosotros y que no es un
    reenvio antiguo.
 3. Entrega. Hay reintentos con espera progresiva e historial, porque el
-   receptor puede estar caido justo cuando se completa un contrato.
+   receptor puede estar caido justo cuando se completa un contrato. La
+   entrega es "al menos una vez": el receptor debe ignorar un X-Event-Id que
+   ya proceso.
 """
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.config import ajustes
@@ -42,6 +44,11 @@ EVENTOS = [
 
 MAX_INTENTOS = 6
 TIMEOUT_SEGUNDOS = 8.0
+
+# EN_CURSO tambien se puede reclamar: es una entrega cuyo proceso murio y
+# cuya reserva ya vencio.
+ESTADOS_RECLAMABLES = ("PENDIENTE", "EN_CURSO")
+RESERVA = timedelta(seconds=TIMEOUT_SEGUNDOS * 4)
 
 
 class DestinoNoPermitido(Exception):
@@ -151,73 +158,134 @@ def _espera(intento: int) -> timedelta:
     return timedelta(seconds=escala[min(intento - 1, len(escala) - 1)])
 
 
+def entregar_en_linea() -> int:
+    """
+    Entrega lo pendiente desde el propio proceso de la API, salvo que la
+    configuracion lo deje todo para el proceso de tareas periodicas.
+    """
+    if not ajustes().entregar_webhooks_en_linea:
+        return 0
+    return procesar_pendientes()
+
+
 def procesar_pendientes(limite: int = 20) -> int:
     """
-    Intenta entregar lo que este pendiente. Se llama despues de encolar y
-    puede llamarse tambien desde una tarea periodica.
+    Intenta entregar lo que este pendiente. Lo llaman la API (despues de
+    responder) y el proceso de tareas periodicas.
+
+    Puede correr en varios procesos a la vez: cada entrega se reclama con un
+    UPDATE condicional antes de enviarla, asi que dos procesos no mandan la
+    misma. Si un proceso muere a mitad de una entrega, la reserva vence y
+    otro la retoma.
     """
     entregadas = 0
-    with FabricaSesion() as sesion:
-        pendientes = sesion.scalars(
-            select(EntregaWebhook)
-            .where(
-                EntregaWebhook.estado == "PENDIENTE",
-                EntregaWebhook.proximo_intento_en <= ahora_utc(),
-            )
-            .order_by(EntregaWebhook.creada_en)
-            .limit(limite)
-        ).all()
-
-        for entrega in pendientes:
-            endpoint = sesion.get(EndpointWebhook, entrega.endpoint_id)
-            if endpoint is None or endpoint.estado != "ACTIVO":
-                entrega.estado = "ABANDONADA"
-                entrega.ultimo_error = "endpoint inactivo"
-                continue
-            if _intentar(sesion, entrega, endpoint):
-                entregadas += 1
-        sesion.commit()
+    for entrega_id in _candidatas(limite):
+        if reclamar(entrega_id) and _entregar(entrega_id):
+            entregadas += 1
     return entregadas
 
 
-def _intentar(sesion: Session, entrega: EntregaWebhook, endpoint: EndpointWebhook) -> bool:
-    intento = entrega.intentos + 1
-    cuerpo = json_canonico(entrega.payload)
+def _candidatas(limite: int) -> list[str]:
+    with FabricaSesion() as sesion:
+        return list(
+            sesion.scalars(
+                select(EntregaWebhook.id)
+                .where(
+                    EntregaWebhook.estado.in_(ESTADOS_RECLAMABLES),
+                    EntregaWebhook.proximo_intento_en <= ahora_utc(),
+                )
+                .order_by(EntregaWebhook.proximo_intento_en)
+                .limit(limite)
+            )
+        )
+
+
+def reclamar(entrega_id: str) -> bool:
+    """
+    Toma la entrega para este proceso. Si otro la tomo primero, el UPDATE no
+    encuentra la fila en el estado esperado y devuelve 0 filas. Funciona igual
+    en SQLite y en PostgreSQL, sin bloqueos de fila explicitos.
+    """
+    ahora = ahora_utc()
+    with FabricaSesion() as sesion:
+        resultado = sesion.execute(
+            update(EntregaWebhook)
+            .where(
+                EntregaWebhook.id == entrega_id,
+                EntregaWebhook.estado.in_(ESTADOS_RECLAMABLES),
+                EntregaWebhook.proximo_intento_en <= ahora,
+            )
+            .values(estado="EN_CURSO", proximo_intento_en=ahora + RESERVA)
+        )
+        sesion.commit()
+        return resultado.rowcount == 1
+
+
+def _entregar(entrega_id: str) -> bool:
+    with FabricaSesion() as sesion:
+        entrega = sesion.get(EntregaWebhook, entrega_id)
+        endpoint = sesion.get(EndpointWebhook, entrega.endpoint_id)
+        if endpoint is None or endpoint.estado != "ACTIVO":
+            entrega.estado = "ABANDONADA"
+            entrega.ultimo_error = "endpoint inactivo"
+            sesion.commit()
+            return False
+        # Se copia lo necesario y se suelta la conexion antes de salir a la
+        # red: un receptor lento no debe retener conexiones de la base.
+        url, secreto_cifrado = endpoint.url, endpoint.secreto_cifrado
+        payload, evento_id, tipo = entrega.payload, entrega.evento_id, entrega.tipo_evento
+
+    codigo, error = _enviar(url, secreto_cifrado, payload, evento_id, tipo)
+
+    with FabricaSesion() as sesion:
+        entrega = sesion.get(EntregaWebhook, entrega_id)
+        endpoint = sesion.get(EndpointWebhook, entrega.endpoint_id)
+        intento = entrega.intentos + 1
+        if error is None:
+            entrega.estado = "ENTREGADA"
+            entrega.intentos = intento
+            entrega.entregada_en = ahora_utc()
+            entrega.ultimo_codigo = codigo
+            entrega.ultimo_error = None
+            endpoint.fallos_consecutivos = 0
+        else:
+            _fallo(entrega, endpoint, intento, error, codigo)
+        sesion.commit()
+    return error is None
+
+
+def _enviar(
+    url: str, secreto_cifrado: str, payload: dict, evento_id: str, tipo: str
+) -> tuple[int | None, str | None]:
+    """Hace la peticion. Devuelve (codigo HTTP, error); error es None si se entrego."""
+    cuerpo = json_canonico(payload)
     try:
         # Revalidacion justo antes de enviar: el DNS pudo cambiar desde el registro.
-        validar_destino(endpoint.url)
+        validar_destino(url)
         marca = str(int(ahora_utc().timestamp()))
-        firma = hmac_sha256(descifrar(endpoint.secreto_cifrado), f"{marca}.{cuerpo}")
+        firma = hmac_sha256(descifrar(secreto_cifrado), f"{marca}.{cuerpo}")
 
         respuesta = httpx.post(
-            endpoint.url,
+            url,
             content=cuerpo.encode("utf-8"),
             headers={
                 "content-type": "application/json",
                 "user-agent": "servicio-contratos-firma/1.0",
                 "x-signature": f"sha256={firma}",
                 "x-timestamp": marca,
-                "x-event-id": entrega.evento_id,
-                "x-event-type": entrega.tipo_evento,
+                "x-event-id": evento_id,
+                "x-event-type": tipo,
             },
             timeout=TIMEOUT_SEGUNDOS,
             # Seguir redirecciones es un vector clasico de SSRF: el destino
             # responde 302 hacia una IP interna y nos lleva de la mano.
             follow_redirects=False,
         )
-        if 200 <= respuesta.status_code < 300:
-            entrega.estado = "ENTREGADA"
-            entrega.intentos = intento
-            entrega.entregada_en = ahora_utc()
-            entrega.ultimo_codigo = respuesta.status_code
-            entrega.ultimo_error = None
-            endpoint.fallos_consecutivos = 0
-            return True
-        _fallo(entrega, endpoint, intento, f"HTTP {respuesta.status_code}", respuesta.status_code)
-        return False
     except Exception as error:
-        _fallo(entrega, endpoint, intento, str(error)[:300], None)
-        return False
+        return None, str(error)[:300]
+    if 200 <= respuesta.status_code < 300:
+        return respuesta.status_code, None
+    return respuesta.status_code, f"HTTP {respuesta.status_code}"
 
 
 def _fallo(
