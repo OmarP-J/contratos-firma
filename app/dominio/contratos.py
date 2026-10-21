@@ -8,10 +8,10 @@ auditar -> completar -> custodiar -> notificar.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app import notificaciones
@@ -716,6 +716,63 @@ def obtener(sesion: Session, tenant_id: str, contrato_id: str) -> Contrato:
     if contrato is None:
         raise NoEncontrado("Contrato no encontrado")
     return contrato
+
+
+def listar(
+    sesion: Session,
+    tenant_id: str,
+    *,
+    estado: str | None = None,
+    referencia_externa: str | None = None,
+    creado_desde: datetime | None = None,
+    creado_hasta: datetime | None = None,
+    despues_de: tuple[datetime, str] | None = None,
+    limite: int = 50,
+) -> list[Contrato]:
+    """
+    Contratos de la empresa, del mas nuevo al mas viejo.
+
+    Pagina por cursor (fecha de creacion + id) y no por desplazamiento: si
+    entran contratos nuevos mientras el integrador recorre las paginas, no se
+    le repiten ni se le saltan filas.
+    """
+    consulta = select(Contrato).where(Contrato.tenant_id == tenant_id)
+    if estado:
+        consulta = consulta.where(Contrato.estado == estado)
+    if referencia_externa:
+        consulta = consulta.where(Contrato.referencia_externa == referencia_externa)
+    if creado_desde:
+        consulta = consulta.where(Contrato.creado_en >= creado_desde)
+    if creado_hasta:
+        consulta = consulta.where(Contrato.creado_en < creado_hasta)
+    if despues_de:
+        fecha, ultimo_id = despues_de
+        consulta = consulta.where(
+            or_(
+                Contrato.creado_en < fecha,
+                and_(Contrato.creado_en == fecha, Contrato.id < ultimo_id),
+            )
+        )
+    return list(
+        sesion.scalars(
+            consulta.order_by(Contrato.creado_en.desc(), Contrato.id.desc()).limit(limite)
+        )
+    )
+
+
+def resumen_json(contrato: Contrato) -> dict[str, Any]:
+    """La version corta de como_json, para listados: sin firmantes."""
+    return {
+        "contract_id": contrato.id,
+        "status": contrato.estado,
+        "title": contrato.titulo,
+        "external_reference": contrato.referencia_externa,
+        "template_version": contrato.numero_version,
+        "created_at": documentos.iso(contrato.creado_en),
+        "sent_at": documentos.iso(contrato.enviado_en),
+        "completed_at": documentos.iso(contrato.completado_en),
+        "expires_at": documentos.iso(contrato.expira_en),
+    }
 
 
 def como_json(sesion: Session, contrato: Contrato) -> dict[str, Any]:

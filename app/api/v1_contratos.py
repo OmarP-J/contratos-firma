@@ -7,6 +7,10 @@ del lado de aca.
 """
 from __future__ import annotations
 
+import base64
+import json
+from datetime import datetime
+
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -31,7 +35,7 @@ from app.dependencias import (
 )
 from app.dominio import auditoria, contratos as servicio, documentos, webhooks
 from app.dominio.contratos import ErrorDeNegocio, NoEncontrado
-from app.dominio.estados import TransicionInvalida
+from app.dominio.estados import Estado, TransicionInvalida
 from app.dominio.plantillas import PlantillaInvalida, sanitizar_cuerpo
 from app.dominio.variables import DatosInvalidos, validar_schema
 from app.almacenamiento import almacen
@@ -134,6 +138,82 @@ def _url_firma_actual(contrato) -> str | None:
     recuperar despues; para reenviarla hay que generar una invitacion nueva.
     """
     return getattr(contrato, "url_firma_recien_creada", None)
+
+
+def _codificar_cursor(contrato) -> str:
+    crudo = json.dumps({"c": contrato.creado_en.isoformat(), "i": contrato.id})
+    return base64.urlsafe_b64encode(crudo.encode()).decode().rstrip("=")
+
+
+def _decodificar_cursor(cursor: str) -> tuple[datetime, str]:
+    try:
+        relleno = "=" * (-len(cursor) % 4)
+        datos = json.loads(base64.urlsafe_b64decode(cursor + relleno))
+        fecha = datetime.fromisoformat(datos["c"])
+        if fecha.tzinfo is None:
+            raise ValueError("cursor sin zona horaria")
+        return fecha, str(datos["i"])
+    except (ValueError, KeyError, TypeError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "cursor_invalido", "mensaje": "El cursor no es valido"},
+        ) from error
+
+
+def _exigir_zona(nombre: str, fecha: datetime | None) -> None:
+    if fecha is not None and fecha.tzinfo is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "fecha_sin_zona",
+                "mensaje": f"{nombre} debe incluir zona horaria, por ejemplo 2026-10-01T00:00:00Z",
+            },
+        )
+
+
+@router.get("/contratos")
+def listar_contratos(
+    estado: str | None = Query(default=None),
+    referencia_externa: str | None = Query(default=None, max_length=120),
+    creado_desde: datetime | None = Query(default=None),
+    creado_hasta: datetime | None = Query(default=None),
+    limite: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = Query(default=None, max_length=300),
+    credencial: CredencialAutenticada = Depends(exigir_permiso("contratos:leer")),
+    sesion: Session = Depends(obtener_sesion),
+):
+    """
+    Contratos de la empresa, del mas nuevo al mas viejo. Para la pagina
+    siguiente se pasa el next_cursor de la respuesta; null es la ultima.
+    """
+    if estado is not None and estado not in {e.value for e in Estado}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "estado_invalido",
+                "mensaje": f"Estado desconocido: {estado}",
+                "detalles": {"validos": [e.value for e in Estado]},
+            },
+        )
+    _exigir_zona("creado_desde", creado_desde)
+    _exigir_zona("creado_hasta", creado_hasta)
+
+    # Se pide uno de mas para saber si hay otra pagina sin contar el total.
+    filas = servicio.listar(
+        sesion,
+        credencial.tenant_id,
+        estado=estado,
+        referencia_externa=referencia_externa,
+        creado_desde=creado_desde,
+        creado_hasta=creado_hasta,
+        despues_de=_decodificar_cursor(cursor) if cursor else None,
+        limite=limite + 1,
+    )
+    pagina = filas[:limite]
+    return {
+        "data": [servicio.resumen_json(c) for c in pagina],
+        "next_cursor": _codificar_cursor(pagina[-1]) if len(filas) > limite else None,
+    }
 
 
 @router.get("/contratos/{contrato_id}")
