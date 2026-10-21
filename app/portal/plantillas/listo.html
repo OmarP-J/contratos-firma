@@ -1,16 +1,24 @@
 {% extends "base.html" %}
-{% block titulo %}Firma registrada{% endblock %}
+{% set rechazada = parte.estado == 'RECHAZADA' %}
+{% block titulo %}{% if rechazada %}Contrato rechazado{% else %}Firma registrada{% endif %}{% endblock %}
 {% block contenido %}
 <div class="tarjeta">
   <h1>Listo, {{ parte.nombre }}</h1>
-  <div class="ok">Tu firma quedo registrada correctamente.</div>
+  {% if rechazada %}
+    <div class="aviso">Registramos que rechazaste este contrato. No se firmo.</div>
+  {% else %}
+    <div class="ok">Tu firma quedo registrada correctamente.</div>
+  {% endif %}
   <dl class="datos">
     <dt>Documento</dt><dd>{{ contrato.titulo }}</dd>
     <dt>Estado del contrato</dt><dd>{{ contrato.estado }}</dd>
     <dt>Identificador</dt><dd>{{ contrato.id }}</dd>
   </dl>
   <p class="sutil" style="margin-top:1.2rem">
-    {% if contrato.estado == 'COMPLETADO' %}
+    {% if rechazada %}
+      La empresa recibira el aviso. Si fue un error, comunicate con ella para que te envie
+      un contrato nuevo.
+    {% elif contrato.estado == 'COMPLETADO' %}
       Todas las partes han firmado. El documento final, con su constancia de firma, ya esta
       disponible para la empresa.
     {% else %}

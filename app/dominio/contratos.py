@@ -258,6 +258,8 @@ def parte_pendiente(sesion: Session, contrato: Contrato) -> ParteContrato | None
 
 def enviar(sesion: Session, ctx: Contexto, contrato: Contrato) -> str:
     """Crea la invitacion de la parte que toca y devuelve su URL de firma."""
+    if esta_vencido(contrato):
+        raise ErrorDeNegocio("El contrato ya vencio: no se pueden enviar invitaciones nuevas")
     parte = parte_pendiente(sesion, contrato)
     if parte is None:
         raise ErrorDeNegocio("No queda ninguna parte pendiente de firma")
@@ -501,12 +503,56 @@ def completar(sesion: Session, ctx: Contexto, contrato: Contrato) -> None:
     )
 
 
-def anular(sesion: Session, ctx: Contexto, contrato: Contrato, motivo: str | None) -> None:
-    exigir_transicion(Estado(contrato.estado), Estado.ANULADO)
-    contrato.estado = Estado.ANULADO.value
-    contrato.anulado_en = ahora_utc()
-    contrato.motivo_anulacion = (motivo or "")[:300] or None
+def rechazar(
+    sesion: Session,
+    ctx: Contexto,
+    *,
+    contrato: Contrato,
+    parte: ParteContrato,
+    motivo: str | None,
+) -> None:
+    """
+    El firmante declina firmar. Cierra el contrato para todas las partes: un
+    contrato que una de ellas rechazo ya no puede completarse.
+    """
+    if parte.estado != "PENDIENTE":
+        raise ErrorDeNegocio("Esta parte ya firmo o rechazo el contrato")
+    exigir_transicion(Estado(contrato.estado), Estado.RECHAZADO)
 
+    texto = (motivo or "").strip()[:300] or None
+    parte.estado = "RECHAZADA"
+    parte.motivo_rechazo = texto
+    contrato.estado = Estado.RECHAZADO.value
+    _revocar_invitaciones(sesion, contrato)
+
+    auditoria.registrar(
+        sesion,
+        tenant_id=contrato.tenant_id,
+        contrato_id=contrato.id,
+        tipo="RECHAZADO",
+        actor_tipo="FIRMANTE",
+        actor_id=parte.id,
+        datos={"rol": parte.rol, "motivo": texto},
+        ip=ctx.ip,
+        agente=ctx.agente,
+    )
+    webhooks.encolar(
+        sesion,
+        tenant_id=contrato.tenant_id,
+        evento=EVENTO_WEBHOOK[Estado.RECHAZADO],
+        contrato_id=contrato.id,
+        datos={
+            "status": contrato.estado,
+            "external_reference": contrato.referencia_externa,
+            "declined_by": parte.rol,
+            "reason": texto,
+        },
+    )
+    sesion.flush()
+
+
+def _revocar_invitaciones(sesion: Session, contrato: Contrato) -> None:
+    """Un contrato cerrado no deja enlaces de firma vivos."""
     for invitacion in sesion.scalars(
         select(Invitacion).where(
             Invitacion.tenant_id == contrato.tenant_id,
@@ -515,6 +561,14 @@ def anular(sesion: Session, ctx: Contexto, contrato: Contrato, motivo: str | Non
         )
     ):
         invitacion.estado = "REVOCADA"
+
+
+def anular(sesion: Session, ctx: Contexto, contrato: Contrato, motivo: str | None) -> None:
+    exigir_transicion(Estado(contrato.estado), Estado.ANULADO)
+    contrato.estado = Estado.ANULADO.value
+    contrato.anulado_en = ahora_utc()
+    contrato.motivo_anulacion = (motivo or "")[:300] or None
+    _revocar_invitaciones(sesion, contrato)
 
     auditoria.registrar(
         sesion,
@@ -535,6 +589,73 @@ def anular(sesion: Session, ctx: Contexto, contrato: Contrato, motivo: str | Non
         datos={"status": contrato.estado, "external_reference": contrato.referencia_externa},
     )
     sesion.flush()
+
+
+# ---------------------------------------------------------------------------
+# Vencimiento
+# ---------------------------------------------------------------------------
+
+# Solo vencen los contratos que todavia esperan al cliente. Una vez que el
+# cliente firmo, la maquina de estados no admite VENCIDO: el contrato queda a
+# la espera de la empresa, que es parte interesada y no deberia perderlo.
+ESTADOS_QUE_VENCEN = (Estado.CREADO.value, Estado.PENDIENTE_CLIENTE.value)
+
+
+def esta_vencido(contrato: Contrato, ahora=None) -> bool:
+    """Si ya paso su vigencia, aunque la tarea periodica aun no lo haya marcado."""
+    return (
+        contrato.estado in ESTADOS_QUE_VENCEN
+        and contrato.expira_en is not None
+        and contrato.expira_en <= (ahora or ahora_utc())
+    )
+
+
+def vencer(sesion: Session, contrato: Contrato) -> None:
+    """Cierra el contrato por vencimiento y revoca sus enlaces de firma."""
+    exigir_transicion(Estado(contrato.estado), Estado.VENCIDO)
+    contrato.estado = Estado.VENCIDO.value
+    _revocar_invitaciones(sesion, contrato)
+
+    auditoria.registrar(
+        sesion,
+        tenant_id=contrato.tenant_id,
+        contrato_id=contrato.id,
+        tipo="VENCIDO",
+        actor_tipo="SISTEMA",
+        datos={"expira_en": documentos.iso(contrato.expira_en)},
+    )
+    webhooks.encolar(
+        sesion,
+        tenant_id=contrato.tenant_id,
+        evento=EVENTO_WEBHOOK[Estado.VENCIDO],
+        contrato_id=contrato.id,
+        datos={"status": contrato.estado, "external_reference": contrato.referencia_externa},
+    )
+    sesion.flush()
+
+
+def vencer_pendientes(sesion: Session, ahora=None, limite: int = 200) -> int:
+    """
+    Marca como vencidos los contratos cuya vigencia ya paso.
+
+    Es una tarea de sistema: recorre todas las empresas, pero cada contrato se
+    cierra con su propio tenant_id en la auditoria y en los webhooks. Procesa
+    por lotes para no bloquear la base si se acumularon muchos.
+    """
+    momento = ahora or ahora_utc()
+    candidatos = sesion.scalars(
+        select(Contrato)
+        .where(
+            Contrato.estado.in_(ESTADOS_QUE_VENCEN),
+            Contrato.expira_en.is_not(None),
+            Contrato.expira_en <= momento,
+        )
+        .order_by(Contrato.expira_en)
+        .limit(limite)
+    ).all()
+    for contrato in candidatos:
+        vencer(sesion, contrato)
+    return len(candidatos)
 
 
 def obtener(sesion: Session, tenant_id: str, contrato_id: str) -> Contrato:
@@ -582,6 +703,7 @@ def como_json(sesion: Session, contrato: Contrato) -> dict[str, Any]:
                 "email": p.email,
                 "status": p.estado,
                 "signed_at": documentos.iso(p.firmado_en),
+                "decline_reason": p.motivo_rechazo,
             }
             for p in partes
         ],

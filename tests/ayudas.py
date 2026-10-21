@@ -62,8 +62,8 @@ def csrf_de(html: str) -> str:
     return encontrado.group(1)
 
 
-def firmar_como(cliente, token: str, codigo: str = "123456", **datos_extra) -> None:
-    """Recorre el portal completo: abrir, pedir codigo, verificar, aceptar y firmar."""
+def identificarse(cliente, token: str, codigo: str = "123456") -> str:
+    """Abre el enlace, pide el codigo y lo verifica. Devuelve la pagina del documento."""
     pagina = cliente.get(f"/firma/{token}", follow_redirects=True)
     assert pagina.status_code == 200, pagina.text
 
@@ -77,9 +77,13 @@ def firmar_como(cliente, token: str, codigo: str = "123456", **datos_extra) -> N
         follow_redirects=True,
     )
     assert verificacion.status_code == 200, verificacion.text
+    return verificacion.text
 
-    csrf = csrf_de(verificacion.text)
-    datos = {"csrf": csrf, "acepto": "si"}
+
+def firmar_como(cliente, token: str, codigo: str = "123456", **datos_extra) -> None:
+    """Recorre el portal completo: abrir, pedir codigo, verificar, aceptar y firmar."""
+    pagina = identificarse(cliente, token, codigo)
+    datos = {"csrf": csrf_de(pagina), "acepto": "si"}
     datos.update(datos_extra)
     firma = cliente.post(f"/firma/{token}/firmar", data=datos, follow_redirects=True)
     assert firma.status_code == 200, firma.text

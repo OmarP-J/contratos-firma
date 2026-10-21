@@ -45,6 +45,17 @@ def _limpiar_limites():
     reiniciar_limites()
 
 
+@pytest.fixture(autouse=True)
+def buzon():
+    """Lo que el servicio le habria enviado a los firmantes, sin enviarlo."""
+    from app import notificaciones
+
+    memoria = notificaciones.NotificadorMemoria()
+    anterior = notificaciones.instalar(memoria)
+    yield memoria
+    notificaciones.instalar(anterior)
+
+
 @pytest.fixture
 def cliente():
     with TestClient(app) as c:

@@ -34,6 +34,18 @@
 
     <button type="submit" id="boton-firmar">Firmar documento</button>
   </form>
+
+  <details class="rechazo">
+    <summary>No estoy de acuerdo y no quiero firmar</summary>
+    <form method="post" action="/firma/{{ token }}/rechazar">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <p class="sutil">Si rechazas, el contrato se cierra y nadie mas podra firmarlo. La
+      empresa recibira el aviso junto con el motivo que escribas.</p>
+      <label for="motivo">Motivo (opcional)</label>
+      <textarea id="motivo" name="motivo" maxlength="300" rows="3"></textarea>
+      <button type="submit" class="secundario">Rechazar el contrato</button>
+    </form>
+  </details>
 </div>
 
 <script nonce="{{ nonce }}">

@@ -28,8 +28,10 @@ class AlmacenLocal:
         if not CLAVE_VALIDA.match(clave) or ".." in clave:
             raise ValueError("Clave de documento invalida")
         ruta = (self.raiz / clave).resolve()
-        # Defensa contra travesia de directorios.
-        if not str(ruta).startswith(str(self.raiz) + "/"):
+        # Defensa contra travesia de directorios. Se compara por componentes de
+        # ruta y no como texto: con "/" fijo, en Windows (que usa "\") todas las
+        # claves legitimas quedaban fuera del almacen.
+        if ruta == self.raiz or not ruta.is_relative_to(self.raiz):
             raise ValueError("Clave fuera del almacen")
         return ruta
 
