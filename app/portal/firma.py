@@ -18,6 +18,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import notificaciones
 from app.almacenamiento import almacen
 from app.config import ajustes
 from app.db import ahora_utc, obtener_sesion
@@ -26,6 +27,7 @@ from app.dominio import auditoria, contratos as servicio, webhooks
 from app.dominio.contratos import Contexto, ErrorDeNegocio
 from app.dominio.estados import TransicionInvalida
 from app.models import Contrato, DesafioOtp, Invitacion, ParteContrato, SesionFirma
+from app.notificaciones import ErrorDeEnvio, Mensaje
 from app.seguridad import (
     codigo_otp,
     comparar_seguro,
@@ -224,14 +226,36 @@ def solicitar_codigo(
         datos={"canal": desafio.canal, "destino": desafio.destino_enmascarado},
         ip=ip_observada(request),
     )
+    # Primero se guarda y despues se envia: un codigo que llega al firmante
+    # pero no quedo registrado no se podria verificar.
     sesion.commit()
 
-    # En produccion esto lo envia el proveedor transaccional. En desarrollo se
-    # imprime para poder probar el flujo completo sin correo.
-    if ajustes().mostrar_secretos_en_log:
-        print(f"[DESARROLLO] codigo OTP para {desafio.destino_enmascarado}: {codigo}")
-
     contexto = _base(request, acceso)
+    try:
+        notificaciones.enviar(
+            Mensaje(
+                canal=desafio.canal,
+                destino=destino,
+                asunto="Tu codigo para firmar",
+                texto=(
+                    f"Tu codigo para firmar \"{acceso.contrato.titulo}\" es {codigo}. "
+                    f"Vence en {ajustes().minutos_otp} minutos. "
+                    "Si no lo pediste, ignora este mensaje."
+                ),
+            )
+        )
+    except ErrorDeEnvio:
+        desafio.estado = "NO_ENVIADO"
+        auditoria.registrar(
+            sesion, tenant_id=acceso.contrato.tenant_id, contrato_id=acceso.contrato.id,
+            tipo="OTP_NO_ENVIADO", actor_tipo="SISTEMA", datos={"canal": desafio.canal},
+        )
+        sesion.commit()
+        contexto["error"] = "No pudimos enviarte el codigo. Intentalo de nuevo en unos minutos."
+        return plantillas.TemplateResponse(
+            request, "identificacion.html", contexto, status_code=502
+        )
+
     contexto.update({"enviado": True, "destino": desafio.destino_enmascarado})
     return plantillas.TemplateResponse(request, "identificacion.html", contexto)
 
