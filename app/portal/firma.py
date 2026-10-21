@@ -192,6 +192,22 @@ def abrir(token: str, request: Request, sesion: Session = Depends(obtener_sesion
 # Paso 2: identificacion con codigo de un solo uso
 # ---------------------------------------------------------------------------
 
+def canal_otp(parte: ParteContrato, politica: dict) -> tuple[str, str] | None:
+    """
+    Por donde va el codigo: el canal que pide la politica congelada en el
+    contrato si el firmante tiene ese dato, y si no el otro. El canal usado
+    queda en la evidencia (OTP_EMAIL u OTP_SMS), asi que el respaldo no pasa
+    desapercibido.
+    """
+    opciones = [("EMAIL", parte.email), ("SMS", parte.telefono)]
+    if politica.get("canal_otp") == "SMS":
+        opciones.reverse()
+    for canal, destino in opciones:
+        if destino:
+            return canal, destino
+    return None
+
+
 @router.post("/{token}/codigo", response_class=HTMLResponse)
 def solicitar_codigo(
     token: str, request: Request, csrf: str = Form(default=""),
@@ -199,9 +215,10 @@ def solicitar_codigo(
 ):
     acceso = resolver_acceso(token, request, sesion, crear_sesion=False)
     exigir_csrf(acceso, csrf)
-    destino = acceso.parte.email or acceso.parte.telefono
-    if not destino:
+    elegido = canal_otp(acceso.parte, acceso.contrato.politica or {})
+    if elegido is None:
         raise _error("Este firmante no tiene correo ni telefono para enviarle el codigo.")
+    canal, destino = elegido
 
     limitar(f"otp:{acceso.parte.id}", limite=5, ventana_s=15 * 60)
 
@@ -209,7 +226,7 @@ def solicitar_codigo(
     desafio = DesafioOtp(
         tenant_id=acceso.contrato.tenant_id,
         sesion_id=acceso.sesion_firma.id,
-        canal="EMAIL" if acceso.parte.email else "SMS",
+        canal=canal,
         destino_enmascarado=enmascarar(destino),
         # Nunca se guarda el codigo en claro.
         codigo_hash=sha256(codigo),
