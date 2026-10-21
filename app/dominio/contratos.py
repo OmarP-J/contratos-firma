@@ -503,6 +503,54 @@ def completar(sesion: Session, ctx: Contexto, contrato: Contrato) -> None:
     )
 
 
+def rechazar(
+    sesion: Session,
+    ctx: Contexto,
+    *,
+    contrato: Contrato,
+    parte: ParteContrato,
+    motivo: str | None,
+) -> None:
+    """
+    El firmante declina firmar. Cierra el contrato para todas las partes: un
+    contrato que una de ellas rechazo ya no puede completarse.
+    """
+    if parte.estado != "PENDIENTE":
+        raise ErrorDeNegocio("Esta parte ya firmo o rechazo el contrato")
+    exigir_transicion(Estado(contrato.estado), Estado.RECHAZADO)
+
+    texto = (motivo or "").strip()[:300] or None
+    parte.estado = "RECHAZADA"
+    parte.motivo_rechazo = texto
+    contrato.estado = Estado.RECHAZADO.value
+    _revocar_invitaciones(sesion, contrato)
+
+    auditoria.registrar(
+        sesion,
+        tenant_id=contrato.tenant_id,
+        contrato_id=contrato.id,
+        tipo="RECHAZADO",
+        actor_tipo="FIRMANTE",
+        actor_id=parte.id,
+        datos={"rol": parte.rol, "motivo": texto},
+        ip=ctx.ip,
+        agente=ctx.agente,
+    )
+    webhooks.encolar(
+        sesion,
+        tenant_id=contrato.tenant_id,
+        evento=EVENTO_WEBHOOK[Estado.RECHAZADO],
+        contrato_id=contrato.id,
+        datos={
+            "status": contrato.estado,
+            "external_reference": contrato.referencia_externa,
+            "declined_by": parte.rol,
+            "reason": texto,
+        },
+    )
+    sesion.flush()
+
+
 def _revocar_invitaciones(sesion: Session, contrato: Contrato) -> None:
     """Un contrato cerrado no deja enlaces de firma vivos."""
     for invitacion in sesion.scalars(
@@ -655,6 +703,7 @@ def como_json(sesion: Session, contrato: Contrato) -> dict[str, Any]:
                 "email": p.email,
                 "status": p.estado,
                 "signed_at": documentos.iso(p.firmado_en),
+                "decline_reason": p.motivo_rechazo,
             }
             for p in partes
         ],

@@ -24,6 +24,7 @@ from app.db import ahora_utc, obtener_sesion
 from app.dependencias import ip_observada, limitar
 from app.dominio import auditoria, contratos as servicio, webhooks
 from app.dominio.contratos import Contexto, ErrorDeNegocio
+from app.dominio.estados import TransicionInvalida
 from app.models import Contrato, DesafioOtp, Invitacion, ParteContrato, SesionFirma
 from app.seguridad import (
     codigo_otp,
@@ -422,6 +423,42 @@ def firmar(
         return plantillas.TemplateResponse(request, "documento.html", contexto, status_code=409)
 
     acceso.invitacion.estado = "USADA"
+    sesion.commit()
+    webhooks.procesar_pendientes()
+    return RedirectResponse(f"/firma/{token}/listo", status_code=303)
+
+
+@router.post("/{token}/rechazar", response_class=HTMLResponse)
+def rechazar(
+    token: str,
+    request: Request,
+    csrf: str = Form(default=""),
+    motivo: str = Form(default=""),
+    sesion: Session = Depends(obtener_sesion),
+):
+    """
+    El firmante declina. Se le exige la misma identificacion que para firmar:
+    rechazar tambien cierra el contrato, y no puede hacerlo cualquiera que
+    tenga el enlace.
+    """
+    acceso = resolver_acceso(token, request, sesion, crear_sesion=False)
+    exigir_csrf(acceso, csrf)
+    _exigir_autenticado(acceso)
+
+    try:
+        servicio.rechazar(
+            sesion,
+            _contexto_firmante(acceso, request),
+            contrato=acceso.contrato,
+            parte=acceso.parte,
+            motivo=motivo,
+        )
+    except (ErrorDeNegocio, TransicionInvalida) as error:
+        sesion.rollback()
+        contexto = _base(request, acceso)
+        contexto["error"] = str(error)
+        return plantillas.TemplateResponse(request, "documento.html", contexto, status_code=409)
+
     sesion.commit()
     webhooks.procesar_pendientes()
     return RedirectResponse(f"/firma/{token}/listo", status_code=303)
