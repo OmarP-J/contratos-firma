@@ -283,12 +283,35 @@ def reenviar_invitacion(
 def descargar_documento(
     contrato_id: str,
     request: Request,
+    formato: str = Query(default="html", pattern="^(html|pdf)$"),
     credencial: CredencialAutenticada = Depends(exigir_permiso("contratos:descargar")),
     sesion: Session = Depends(obtener_sesion),
 ):
+    """
+    El documento presentado a firma o, si ya se completo, el final con su
+    constancia. Con formato=pdf, la version PDF del documento final.
+    """
     limitar(f"descarga:{credencial.tenant_id}", limite=60, ventana_s=60)
     contrato = servicio.obtener(sesion, credencial.tenant_id, contrato_id)
-    clave = contrato.clave_documento_final or contrato.clave_documento
+    es_final = contrato.clave_documento_final is not None
+
+    if formato == "pdf":
+        if contrato.clave_documento_final_pdf is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "pdf_no_disponible",
+                    "mensaje": "El PDF se emite al completar el contrato"
+                    if not es_final else "No se pudo generar el PDF; el HTML sigue disponible",
+                },
+            )
+        clave, hash_ = contrato.clave_documento_final_pdf, contrato.hash_documento_final_pdf
+        tipo, disposicion = "application/pdf", "attachment"
+    else:
+        clave = contrato.clave_documento_final or contrato.clave_documento
+        hash_ = contrato.hash_documento_final or contrato.hash_documento
+        tipo, disposicion = "text/html; charset=utf-8", "inline"
+
     contenido = almacen.leer(clave)
     auditoria.registrar(
         sesion,
@@ -297,18 +320,18 @@ def descargar_documento(
         tipo="DESCARGADO",
         actor_tipo="CREDENCIAL",
         actor_id=credencial.id,
+        datos={"formato": formato},
         ip=ip_observada(request),
         agente=request.headers.get("user-agent"),
     )
     sesion.commit()
-    es_final = contrato.clave_documento_final is not None
     return Response(
         content=contenido,
-        media_type="text/html; charset=utf-8",
+        media_type=tipo,
         headers={
-            "X-Document-Hash": contrato.hash_documento_final or contrato.hash_documento,
+            "X-Document-Hash": hash_,
             "X-Document-Kind": "final" if es_final else "presentado",
-            "Content-Disposition": f'inline; filename="contrato-{contrato.id[:8]}.html"',
+            "Content-Disposition": f'{disposicion}; filename="contrato-{contrato.id[:8]}.{formato}"',
         },
     )
 

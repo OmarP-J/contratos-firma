@@ -7,6 +7,7 @@ auditar -> completar -> custodiar -> notificar.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -17,7 +18,7 @@ from sqlalchemy.orm import Session
 from app.almacenamiento import almacen, nueva_clave
 from app.config import ajustes
 from app.db import ahora_utc
-from app.dominio import auditoria, avisos, documentos, webhooks
+from app.dominio import auditoria, avisos, documentos, pdf, webhooks
 from app.dominio.estados import EVENTO_WEBHOOK, Estado, exigir_transicion
 from app.dominio.firma import SolicitudFirma, proveedor_actual
 from app.dominio.politica import normalizar as normalizar_politica
@@ -36,6 +37,8 @@ from app.models import (
 )
 from app.notificaciones import Mensaje
 from app.seguridad import hash_de_token, json_canonico, sha256, token_aleatorio
+
+registro = logging.getLogger("contratos")
 
 
 class ErrorDeNegocio(Exception):
@@ -528,6 +531,7 @@ def completar(sesion: Session, ctx: Contexto, contrato: Contrato) -> None:
 
     contrato.clave_documento_final = clave_final
     contrato.hash_documento_final = final.hash
+    hash_pdf = _emitir_pdf(sesion, contrato, final.html)
 
     auditoria.registrar(
         sesion,
@@ -535,7 +539,7 @@ def completar(sesion: Session, ctx: Contexto, contrato: Contrato) -> None:
         contrato_id=contrato.id,
         tipo="COMPLETADO",
         actor_tipo="SISTEMA",
-        datos={"hash_documento_final": final.hash},
+        datos={"hash_documento_final": final.hash, "hash_documento_final_pdf": hash_pdf},
     )
     webhooks.encolar(
         sesion,
@@ -546,8 +550,36 @@ def completar(sesion: Session, ctx: Contexto, contrato: Contrato) -> None:
             "status": contrato.estado,
             "external_reference": contrato.referencia_externa,
             "document_hash": final.hash,
+            "document_pdf_hash": hash_pdf,
         },
     )
+
+
+def _emitir_pdf(sesion: Session, contrato: Contrato, html_final: str) -> str | None:
+    """
+    Guarda la version PDF del documento final y devuelve su hash.
+
+    Si la conversion falla, el contrato se completa igual y queda constancia
+    en la auditoria: el documento de referencia es el HTML, y perder firmas
+    ya hechas por un problema de maquetacion seria mucho peor.
+    """
+    try:
+        datos = pdf.html_a_pdf(html_final, titulo=contrato.titulo)
+    except Exception:
+        registro.exception("no se pudo generar el PDF del contrato %s", contrato.id)
+        auditoria.registrar(
+            sesion,
+            tenant_id=contrato.tenant_id,
+            contrato_id=contrato.id,
+            tipo="PDF_NO_GENERADO",
+            actor_tipo="SISTEMA",
+        )
+        return None
+    clave = nueva_clave(contrato.tenant_id, contrato.id, "final.pdf")
+    almacen.guardar(clave, datos)
+    contrato.clave_documento_final_pdf = clave
+    contrato.hash_documento_final_pdf = sha256(datos)
+    return contrato.hash_documento_final_pdf
 
 
 def rechazar(
@@ -795,6 +827,7 @@ def como_json(sesion: Session, contrato: Contrato) -> dict[str, Any]:
         "variables_hash": contrato.hash_variables,
         "document_hash": contrato.hash_documento,
         "final_document_hash": contrato.hash_documento_final,
+        "final_document_pdf_hash": contrato.hash_documento_final_pdf,
         "created_at": documentos.iso(contrato.creado_en),
         "sent_at": documentos.iso(contrato.enviado_en),
         "completed_at": documentos.iso(contrato.completado_en),

@@ -118,6 +118,9 @@ class Contrato(Base):
     hash_documento: Mapped[str] = mapped_column(String(64))
     clave_documento_final: Mapped[str | None] = mapped_column(String(200), nullable=True)
     hash_documento_final: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Representacion PDF del documento final. El de referencia sigue siendo el HTML.
+    clave_documento_final_pdf: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    hash_documento_final_pdf: Mapped[str | None] = mapped_column(String(64), nullable=True)
     politica: Mapped[dict] = mapped_column(JSON, default=dict)
 
     credencial_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
