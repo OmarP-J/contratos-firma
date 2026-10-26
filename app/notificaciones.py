@@ -52,7 +52,10 @@ class NotificadorConsola:
         if not ajustes().mostrar_secretos_en_log:
             registro.info("mensaje %s a %s (contenido oculto)", mensaje.canal, destino)
             return
-        print(f"[DESARROLLO] {mensaje.canal} a {destino}: {mensaje.asunto}\n{mensaje.texto}")
+        # flush: sin terminal (Docker, un servicio, un IDE) la salida va con
+        # bufer y el codigo no apareceria hasta mucho despues.
+        print(f"[DESARROLLO] {mensaje.canal} a {destino}: {mensaje.asunto}\n{mensaje.texto}",
+              flush=True)
 
 
 class NotificadorMemoria:
