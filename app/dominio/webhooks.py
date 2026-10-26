@@ -20,7 +20,7 @@ import ipaddress
 import socket
 from datetime import timedelta
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 from sqlalchemy import select, update
@@ -68,9 +68,9 @@ def validar_destino(url: str) -> list[str]:
     Comprueba que la URL de webhook apunte a Internet publico.
 
     Se aplica al registrar el endpoint y otra vez justo antes de cada entrega,
-    porque el DNS puede cambiar entre ambos momentos. El pinning de la IP
-    resuelta queda como mejora pendiente; mientras tanto, revalidar y no seguir
-    redirecciones cubre los vectores habituales.
+    porque el DNS puede cambiar entre ambos momentos. Devuelve las IPs
+    validadas, en el orden en que las dio el DNS: la entrega se conecta a una
+    de ellas y no vuelve a resolver el nombre.
     """
     partes = urlparse(url)
     permitir_privado = ajustes().permitir_webhook_privado
@@ -82,12 +82,13 @@ def validar_destino(url: str) -> list[str]:
     if not partes.hostname:
         raise DestinoNoPermitido("La URL del webhook no tiene host")
 
+    puerto = partes.port or (443 if partes.scheme == "https" else 80)
     try:
-        resueltas = socket.getaddrinfo(partes.hostname, partes.port or 443, proto=socket.IPPROTO_TCP)
+        resueltas = socket.getaddrinfo(partes.hostname, puerto, proto=socket.IPPROTO_TCP)
     except socket.gaierror as error:
         raise DestinoNoPermitido("No se pudo resolver el host del webhook") from error
 
-    direcciones = sorted({info[4][0] for info in resueltas})
+    direcciones = list(dict.fromkeys(info[4][0] for info in resueltas))
     if not direcciones:
         raise DestinoNoPermitido("El host del webhook no resuelve a ninguna IP")
 
@@ -269,14 +270,15 @@ def _enviar(
     cuerpo = json_canonico(payload)
     try:
         # Revalidacion justo antes de enviar: el DNS pudo cambiar desde el registro.
-        validar_destino(url)
+        direcciones = validar_destino(url)
         marca = str(int(ahora_utc().timestamp()))
         firma = hmac_sha256(descifrar(secreto_cifrado), f"{marca}.{cuerpo}")
 
-        respuesta = httpx.post(
+        respuesta = _publicar_fijado(
             url,
-            content=cuerpo.encode("utf-8"),
-            headers={
+            direcciones,
+            cuerpo.encode("utf-8"),
+            {
                 "content-type": "application/json",
                 "user-agent": "servicio-contratos-firma/1.0",
                 "x-signature": f"sha256={firma}",
@@ -284,16 +286,59 @@ def _enviar(
                 "x-event-id": evento_id,
                 "x-event-type": tipo,
             },
-            timeout=TIMEOUT_SEGUNDOS,
-            # Seguir redirecciones es un vector clasico de SSRF: el destino
-            # responde 302 hacia una IP interna y nos lleva de la mano.
-            follow_redirects=False,
         )
     except Exception as error:
         return None, str(error)[:300]
     if 200 <= respuesta.status_code < 300:
         return respuesta.status_code, None
     return respuesta.status_code, f"HTTP {respuesta.status_code}"
+
+
+# Solo para pruebas: permite inspeccionar las peticiones sin salir a la red.
+_transporte: httpx.BaseTransport | None = None
+
+
+def _url_hacia(url: str, ip: str) -> str:
+    """La misma URL, con la IP ya validada en lugar del nombre."""
+    partes = urlparse(url)
+    host = f"[{ip}]" if ":" in ip else ip
+    return urlunparse(partes._replace(netloc=f"{host}:{partes.port}" if partes.port else host))
+
+
+def _publicar_fijado(
+    url: str, direcciones: list[str], contenido: bytes, cabeceras: dict[str, str]
+) -> httpx.Response:
+    """
+    Se conecta a una IP que ya paso la validacion, no a lo que diga el DNS un
+    instante despues.
+
+    Sin esto, quien controle el DNS del dominio puede responder una IP publica
+    al validar y 127.0.0.1 al conectar (DNS rebinding). El nombre original
+    viaja en la cabecera Host y en el SNI de TLS, asi que el receptor y la
+    verificacion del certificado siguen viendo su dominio.
+    """
+    partes = urlparse(url)
+    ultimo_error: Exception | None = None
+    with httpx.Client(
+        timeout=TIMEOUT_SEGUNDOS,
+        # Seguir redirecciones es un vector clasico de SSRF: el destino
+        # responde 302 hacia una IP interna y nos lleva de la mano.
+        follow_redirects=False,
+        transport=_transporte,
+    ) as http:
+        for ip in direcciones:
+            try:
+                return http.post(
+                    _url_hacia(url, ip),
+                    content=contenido,
+                    headers={**cabeceras, "host": partes.netloc},
+                    extensions={"sni_hostname": partes.hostname},
+                )
+            except httpx.ConnectError as error:
+                # Un nombre puede resolver a varias IPs (IPv6 e IPv4, por
+                # ejemplo); si una no acepta la conexion se prueba la siguiente.
+                ultimo_error = error
+    raise ultimo_error or DestinoNoPermitido("No hay direcciones a las que conectar")
 
 
 def _fallo(
