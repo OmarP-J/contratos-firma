@@ -36,11 +36,11 @@ from app.dependencias import (
 from app.dominio import auditoria, contratos as servicio, documentos, webhooks
 from app.dominio.contratos import ErrorDeNegocio, NoEncontrado
 from app.dominio.estados import Estado, TransicionInvalida
-from app.dominio.plantillas import PlantillaInvalida, sanitizar_cuerpo
-from app.dominio.variables import DatosInvalidos, validar_schema
+from app.dominio.plantillas import PlantillaInvalida
+from app.dominio.variables import DatosInvalidos
 from app.tareas import despachar_en_linea
 from app.almacenamiento import almacen
-from app.models import ClaveIdempotencia, Plantilla, VersionPlantilla
+from app.models import ClaveIdempotencia
 from app.schemas import AnularContrato, CrearContrato, CrearPlantilla, RegistrarWebhook
 from app.seguridad import json_canonico, sha256
 
@@ -488,64 +488,21 @@ def crear_plantilla(
 ):
     """Crea la plantilla si no existe y publica una version nueva e inmutable."""
     try:
-        schema = validar_schema(peticion.schema_variables)
-        cuerpo = sanitizar_cuerpo(peticion.cuerpo)
+        plantilla, version = servicio.publicar_plantilla(
+            sesion,
+            credencial.tenant_id,
+            codigo=peticion.codigo,
+            nombre=peticion.nombre,
+            titulo=peticion.titulo,
+            cuerpo=peticion.cuerpo,
+            schema_variables=peticion.schema_variables,
+            politica=peticion.politica,
+        )
     except (DatosInvalidos, PlantillaInvalida) as error:
         detalles = getattr(error, "detalles", None)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "plantilla_invalida", "mensaje": str(error), "detalles": detalles},
-        ) from error
-
-    plantilla = sesion.scalars(
-        select(Plantilla).where(
-            Plantilla.tenant_id == credencial.tenant_id, Plantilla.codigo == peticion.codigo
-        )
-    ).first()
-    if plantilla is None:
-        plantilla = Plantilla(
-            tenant_id=credencial.tenant_id, codigo=peticion.codigo, nombre=peticion.nombre
-        )
-        sesion.add(plantilla)
-        sesion.flush()
-
-    ultima = sesion.scalars(
-        select(VersionPlantilla)
-        .where(
-            VersionPlantilla.tenant_id == credencial.tenant_id,
-            VersionPlantilla.plantilla_id == plantilla.id,
-        )
-        .order_by(VersionPlantilla.version.desc())
-        .limit(1)
-    ).first()
-
-    from app.dominio.politica import normalizar as normalizar_politica
-
-    politica = normalizar_politica(peticion.politica)
-    numero = (ultima.version if ultima else 0) + 1
-    version = VersionPlantilla(
-        tenant_id=credencial.tenant_id,
-        plantilla_id=plantilla.id,
-        version=numero,
-        titulo=peticion.titulo,
-        cuerpo=cuerpo,
-        schema_variables=schema,
-        politica=politica,
-        hash_contenido=sha256(
-            json_canonico(
-                {"cuerpo": cuerpo, "schema": schema, "politica": politica,
-                 "titulo": peticion.titulo, "version": numero}
-            )
-        ),
-    )
-    sesion.add(version)
-    sesion.flush()
-    try:
-        servicio.publicar_version(sesion, version)
-    except PlantillaInvalida as error:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": "plantilla_invalida", "mensaje": str(error)},
         ) from error
     sesion.commit()
     return {

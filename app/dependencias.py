@@ -16,10 +16,10 @@ from sqlalchemy.orm import Session
 from app.config import ajustes
 from app.db import ahora_utc, obtener_sesion
 from app.dominio.contratos import Contexto
+from app.dominio.credenciales import PERMISOS  # noqa: F401  (lista canonica)
 from app.models import CredencialApi
 from app.seguridad import verificar_secreto
 
-PERMISOS = {"contratos:crear", "contratos:leer", "contratos:anular", "contratos:descargar"}
 
 registro = logging.getLogger("limites")
 

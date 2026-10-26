@@ -11,12 +11,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.db import FabricaSesion, crear_tablas  # noqa: E402
-from app.dominio.contratos import publicar_version  # noqa: E402
-from app.dominio.politica import normalizar  # noqa: E402
-from app.dominio.plantillas import sanitizar_cuerpo  # noqa: E402
-from app.dominio.variables import validar_schema  # noqa: E402
-from app.models import CredencialApi, Plantilla, Tenant, VersionPlantilla  # noqa: E402
-from app.seguridad import hash_secreto, json_canonico, sha256, token_aleatorio  # noqa: E402
+from app.dominio import credenciales  # noqa: E402
+from app.dominio.contratos import publicar_plantilla  # noqa: E402
+from app.models import Tenant  # noqa: E402
 
 CUERPO = """
 <p>Entre <strong>ACME Servicios SRL</strong>, en lo adelante EL PRESTADOR, y
@@ -54,40 +51,20 @@ def sembrar() -> dict:
         sesion.add(tenant)
         sesion.flush()
 
-        secreto = token_aleatorio(24)
-        credencial = CredencialApi(
-            tenant_id=tenant.id,
-            nombre="Integracion principal",
-            client_id=f"cli_{token_aleatorio(8)}",
-            secreto_hash=hash_secreto(secreto),
-            permisos=[
-                "contratos:crear", "contratos:leer", "contratos:anular",
-                "contratos:descargar", "plantillas:administrar",
-            ],
+        credencial, secreto = credenciales.crear(
+            sesion, tenant.id, nombre="Integracion principal",
+            permisos=list(credenciales.PERMISOS),
         )
-        sesion.add(credencial)
-
-        plantilla = Plantilla(tenant_id=tenant.id, codigo="contrato_servicio",
-                              nombre="Contrato de servicio")
-        sesion.add(plantilla)
-        sesion.flush()
-
-        cuerpo = sanitizar_cuerpo(CUERPO)
-        schema = validar_schema(SCHEMA)
-        politica = normalizar({"requiere_otp": True, "requiere_firma_empresa": True})
-        version = VersionPlantilla(
-            tenant_id=tenant.id,
-            plantilla_id=plantilla.id,
-            version=1,
+        plantilla, _ = publicar_plantilla(
+            sesion,
+            tenant.id,
+            codigo="contrato_servicio",
+            nombre="Contrato de servicio",
             titulo="Contrato de Servicio",
-            cuerpo=cuerpo,
-            schema_variables=schema,
-            politica=politica,
-            hash_contenido=sha256(json_canonico({"cuerpo": cuerpo, "schema": schema})),
+            cuerpo=CUERPO,
+            schema_variables=SCHEMA,
+            politica={"requiere_otp": True, "requiere_firma_empresa": True},
         )
-        sesion.add(version)
-        sesion.flush()
-        publicar_version(sesion, version)
         sesion.commit()
 
         return {

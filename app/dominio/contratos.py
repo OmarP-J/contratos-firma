@@ -22,8 +22,8 @@ from app.dominio import auditoria, avisos, documentos, pdf, webhooks
 from app.dominio.estados import EVENTO_WEBHOOK, Estado, exigir_transicion
 from app.dominio.firma import SolicitudFirma, proveedor_actual
 from app.dominio.politica import normalizar as normalizar_politica
-from app.dominio.plantillas import validar_coherencia
-from app.dominio.variables import DatosInvalidos, validar_valores
+from app.dominio.plantillas import sanitizar_cuerpo, validar_coherencia
+from app.dominio.variables import DatosInvalidos, validar_schema, validar_valores
 from app.models import (
     Contrato,
     Invitacion,
@@ -102,6 +102,65 @@ def resolver_version(
         detalle = f"version {pedida} de " if pedida is not None else ""
         raise ErrorDeNegocio(f"No hay una {detalle}la plantilla publicada: {referencia}")
     return encontrada
+
+
+def publicar_plantilla(
+    sesion: Session,
+    tenant_id: str,
+    *,
+    codigo: str,
+    nombre: str,
+    titulo: str,
+    cuerpo: str,
+    schema_variables: dict,
+    politica: dict | None = None,
+) -> tuple[Plantilla, VersionPlantilla]:
+    """
+    Crea la plantilla si no existe y publica una version nueva e inmutable.
+    Lanza DatosInvalidos o PlantillaInvalida con el detalle de lo que falla.
+    """
+    schema = validar_schema(schema_variables)
+    cuerpo = sanitizar_cuerpo(cuerpo)
+
+    plantilla = sesion.scalars(
+        select(Plantilla).where(Plantilla.tenant_id == tenant_id, Plantilla.codigo == codigo)
+    ).first()
+    if plantilla is None:
+        plantilla = Plantilla(tenant_id=tenant_id, codigo=codigo, nombre=nombre)
+        sesion.add(plantilla)
+        sesion.flush()
+
+    ultima = sesion.scalars(
+        select(VersionPlantilla)
+        .where(
+            VersionPlantilla.tenant_id == tenant_id,
+            VersionPlantilla.plantilla_id == plantilla.id,
+        )
+        .order_by(VersionPlantilla.version.desc())
+        .limit(1)
+    ).first()
+
+    politica = normalizar_politica(politica)
+    numero = (ultima.version if ultima else 0) + 1
+    version = VersionPlantilla(
+        tenant_id=tenant_id,
+        plantilla_id=plantilla.id,
+        version=numero,
+        titulo=titulo,
+        cuerpo=cuerpo,
+        schema_variables=schema,
+        politica=politica,
+        hash_contenido=sha256(
+            json_canonico(
+                {"cuerpo": cuerpo, "schema": schema, "politica": politica,
+                 "titulo": titulo, "version": numero}
+            )
+        ),
+    )
+    sesion.add(version)
+    sesion.flush()
+    publicar_version(sesion, version)
+    return plantilla, version
 
 
 def publicar_version(sesion: Session, version: VersionPlantilla) -> VersionPlantilla:
