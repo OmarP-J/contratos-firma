@@ -28,6 +28,9 @@ class Ajustes(BaseSettings):
     intentos_maximos_otp: int = 5
 
     permitir_webhook_privado: bool = False
+    # true: la API entrega los webhooks justo despues de responder.
+    # false: solo los entrega el proceso de tareas (python -m scripts.tareas).
+    entregar_webhooks_en_linea: bool = True
     mostrar_secretos_en_log: bool = True
 
     # Correo saliente: consola (desarrollo) o smtp.
@@ -49,6 +52,10 @@ class Ajustes(BaseSettings):
 
     # Proxies de confianza para aceptar la cabecera X-Forwarded-For.
     proxies_confiables: str = ""
+
+    # Vacia -> limites de peticiones en memoria (una sola instancia).
+    # Con valor (redis://host:6379/0) -> limites compartidos entre instancias.
+    url_redis: str = ""
 
     @property
     def es_produccion(self) -> bool:

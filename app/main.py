@@ -7,8 +7,9 @@ del dominio a respuestas HTTP.
 from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
+from app.admin.rutas import Redirigir, router as router_admin
 from app.api.v1_contratos import router as router_b2b
 from app.config import ajustes
 from app.db import crear_tablas
@@ -51,6 +52,15 @@ async def cabeceras_de_seguridad(request: Request, call_next):
         respuesta.headers.setdefault(
             "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
         )
+    if request.url.path.startswith("/admin"):
+        # Sin scripts: el portal administrativo no necesita ninguno. Y nada de
+        # lo que muestra (secretos, datos de firmantes) debe quedar en cache.
+        respuesta.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; "
+            "form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+        )
+        respuesta.headers.setdefault("Cache-Control", "no-store")
     return respuesta
 
 
@@ -59,6 +69,11 @@ def _json(codigo: int, error: str, mensaje: str, detalles: dict | None = None) -
     if detalles:
         cuerpo["detalles"] = detalles
     return JSONResponse(status_code=codigo, content=cuerpo)
+
+
+@app.exception_handler(Redirigir)
+async def _redirigir(_: Request, error: Redirigir):
+    return RedirectResponse(error.destino, status_code=status.HTTP_303_SEE_OTHER)
 
 
 @app.exception_handler(NoEncontrado)
@@ -127,3 +142,4 @@ def clave_de_firma() -> dict:
 
 app.include_router(router_b2b)
 app.include_router(router_portal)
+app.include_router(router_admin)

@@ -7,7 +7,19 @@ del lado de aca.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from datetime import datetime
+
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -19,13 +31,14 @@ from app.dependencias import (
     ip_observada,
     limitar,
 )
-from app.dominio import auditoria, contratos as servicio, webhooks
+from app.dominio import auditoria, contratos as servicio, documentos, webhooks
 from app.dominio.contratos import ErrorDeNegocio, NoEncontrado
-from app.dominio.estados import TransicionInvalida
-from app.dominio.plantillas import PlantillaInvalida, sanitizar_cuerpo
-from app.dominio.variables import DatosInvalidos, validar_schema
+from app.dominio.estados import Estado, TransicionInvalida
+from app.dominio.plantillas import PlantillaInvalida
+from app.dominio.variables import DatosInvalidos
+from app.tareas import despachar_en_linea
 from app.almacenamiento import almacen
-from app.models import ClaveIdempotencia, Plantilla, VersionPlantilla
+from app.models import ClaveIdempotencia
 from app.schemas import AnularContrato, CrearContrato, CrearPlantilla, RegistrarWebhook
 from app.seguridad import json_canonico, sha256
 
@@ -37,6 +50,7 @@ def crear_contrato(
     peticion: CrearContrato,
     request: Request,
     response: Response,
+    tareas: BackgroundTasks,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     credencial: CredencialAutenticada = Depends(exigir_permiso("contratos:crear")),
     sesion: Session = Depends(obtener_sesion),
@@ -112,7 +126,7 @@ def crear_contrato(
             )
         )
     sesion.commit()
-    webhooks.procesar_pendientes()
+    tareas.add_task(despachar_en_linea)
     return cuerpo
 
 
@@ -123,6 +137,72 @@ def _url_firma_actual(contrato) -> str | None:
     recuperar despues; para reenviarla hay que generar una invitacion nueva.
     """
     return getattr(contrato, "url_firma_recien_creada", None)
+
+
+def _decodificar_cursor(cursor: str) -> tuple[datetime, str]:
+    try:
+        return servicio.leer_cursor(cursor)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "cursor_invalido", "mensaje": "El cursor no es valido"},
+        ) from error
+
+
+def _exigir_zona(nombre: str, fecha: datetime | None) -> None:
+    if fecha is not None and fecha.tzinfo is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "fecha_sin_zona",
+                "mensaje": f"{nombre} debe incluir zona horaria, por ejemplo 2026-10-01T00:00:00Z",
+            },
+        )
+
+
+@router.get("/contratos")
+def listar_contratos(
+    estado: str | None = Query(default=None),
+    referencia_externa: str | None = Query(default=None, max_length=120),
+    creado_desde: datetime | None = Query(default=None),
+    creado_hasta: datetime | None = Query(default=None),
+    limite: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = Query(default=None, max_length=300),
+    credencial: CredencialAutenticada = Depends(exigir_permiso("contratos:leer")),
+    sesion: Session = Depends(obtener_sesion),
+):
+    """
+    Contratos de la empresa, del mas nuevo al mas viejo. Para la pagina
+    siguiente se pasa el next_cursor de la respuesta; null es la ultima.
+    """
+    if estado is not None and estado not in {e.value for e in Estado}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "estado_invalido",
+                "mensaje": f"Estado desconocido: {estado}",
+                "detalles": {"validos": [e.value for e in Estado]},
+            },
+        )
+    _exigir_zona("creado_desde", creado_desde)
+    _exigir_zona("creado_hasta", creado_hasta)
+
+    # Se pide uno de mas para saber si hay otra pagina sin contar el total.
+    filas = servicio.listar(
+        sesion,
+        credencial.tenant_id,
+        estado=estado,
+        referencia_externa=referencia_externa,
+        creado_desde=creado_desde,
+        creado_hasta=creado_hasta,
+        despues_de=_decodificar_cursor(cursor) if cursor else None,
+        limite=limite + 1,
+    )
+    pagina = filas[:limite]
+    return {
+        "data": [servicio.resumen_json(c) for c in pagina],
+        "next_cursor": servicio.cursor_de(pagina[-1]) if len(filas) > limite else None,
+    }
 
 
 @router.get("/contratos/{contrato_id}")
@@ -141,6 +221,7 @@ def anular_contrato(
     contrato_id: str,
     peticion: AnularContrato,
     request: Request,
+    tareas: BackgroundTasks,
     credencial: CredencialAutenticada = Depends(exigir_permiso("contratos:anular")),
     sesion: Session = Depends(obtener_sesion),
 ):
@@ -153,7 +234,7 @@ def anular_contrato(
             detail={"error": "estado_invalido", "mensaje": str(error)},
         ) from error
     sesion.commit()
-    webhooks.procesar_pendientes()
+    tareas.add_task(despachar_en_linea)
     return servicio.como_json(sesion, contrato)
 
 
@@ -161,6 +242,7 @@ def anular_contrato(
 def reenviar_invitacion(
     contrato_id: str,
     request: Request,
+    tareas: BackgroundTasks,
     credencial: CredencialAutenticada = Depends(exigir_permiso("contratos:crear")),
     sesion: Session = Depends(obtener_sesion),
 ):
@@ -179,7 +261,7 @@ def reenviar_invitacion(
             detail={"error": "estado_invalido", "mensaje": str(error)},
         ) from error
     sesion.commit()
-    webhooks.procesar_pendientes()
+    tareas.add_task(despachar_en_linea)
     cuerpo = servicio.como_json(sesion, contrato)
     cuerpo["signing_url"] = url
     return cuerpo
@@ -189,12 +271,35 @@ def reenviar_invitacion(
 def descargar_documento(
     contrato_id: str,
     request: Request,
+    formato: str = Query(default="html", pattern="^(html|pdf)$"),
     credencial: CredencialAutenticada = Depends(exigir_permiso("contratos:descargar")),
     sesion: Session = Depends(obtener_sesion),
 ):
+    """
+    El documento presentado a firma o, si ya se completo, el final con su
+    constancia. Con formato=pdf, la version PDF del documento final.
+    """
     limitar(f"descarga:{credencial.tenant_id}", limite=60, ventana_s=60)
     contrato = servicio.obtener(sesion, credencial.tenant_id, contrato_id)
-    clave = contrato.clave_documento_final or contrato.clave_documento
+    es_final = contrato.clave_documento_final is not None
+
+    if formato == "pdf":
+        if contrato.clave_documento_final_pdf is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "pdf_no_disponible",
+                    "mensaje": "El PDF se emite al completar el contrato"
+                    if not es_final else "No se pudo generar el PDF; el HTML sigue disponible",
+                },
+            )
+        clave, hash_ = contrato.clave_documento_final_pdf, contrato.hash_documento_final_pdf
+        tipo, disposicion = "application/pdf", "attachment"
+    else:
+        clave = contrato.clave_documento_final or contrato.clave_documento
+        hash_ = contrato.hash_documento_final or contrato.hash_documento
+        tipo, disposicion = "text/html; charset=utf-8", "inline"
+
     contenido = almacen.leer(clave)
     auditoria.registrar(
         sesion,
@@ -203,18 +308,18 @@ def descargar_documento(
         tipo="DESCARGADO",
         actor_tipo="CREDENCIAL",
         actor_id=credencial.id,
+        datos={"formato": formato},
         ip=ip_observada(request),
         agente=request.headers.get("user-agent"),
     )
     sesion.commit()
-    es_final = contrato.clave_documento_final is not None
     return Response(
         content=contenido,
-        media_type="text/html; charset=utf-8",
+        media_type=tipo,
         headers={
-            "X-Document-Hash": contrato.hash_documento_final or contrato.hash_documento,
+            "X-Document-Hash": hash_,
             "X-Document-Kind": "final" if es_final else "presentado",
-            "Content-Disposition": f'inline; filename="contrato-{contrato.id[:8]}.html"',
+            "Content-Disposition": f'{disposicion}; filename="contrato-{contrato.id[:8]}.{formato}"',
         },
     )
 
@@ -271,6 +376,98 @@ def registrar_webhook(
     }
 
 
+def _endpoint_json(endpoint) -> dict:
+    # Sin el secreto: solo se muestra al registrar.
+    return {
+        "endpoint_id": endpoint.id,
+        "url": endpoint.url,
+        "events": endpoint.eventos,
+        "status": endpoint.estado,
+        "consecutive_failures": endpoint.fallos_consecutivos,
+        "created_at": documentos.iso(endpoint.creado_en),
+    }
+
+
+def _entrega_json(entrega) -> dict:
+    return {
+        "delivery_id": entrega.id,
+        "event": entrega.tipo_evento,
+        "event_id": entrega.evento_id,
+        "contract_id": entrega.contrato_id,
+        "status": entrega.estado,
+        "attempts": entrega.intentos,
+        "last_status_code": entrega.ultimo_codigo,
+        "last_error": entrega.ultimo_error,
+        "next_attempt_at": documentos.iso(entrega.proximo_intento_en),
+        "created_at": documentos.iso(entrega.creada_en),
+        "delivered_at": documentos.iso(entrega.entregada_en),
+    }
+
+
+def _endpoint_o_404(sesion: Session, tenant_id: str, endpoint_id: str):
+    endpoint = webhooks.obtener_endpoint(sesion, tenant_id, endpoint_id)
+    if endpoint is None:
+        raise NoEncontrado("Endpoint no encontrado")
+    return endpoint
+
+
+@router.get("/webhooks")
+def listar_webhooks(
+    credencial: CredencialAutenticada = Depends(exigir_permiso("contratos:leer")),
+    sesion: Session = Depends(obtener_sesion),
+):
+    return {"data": [_endpoint_json(e) for e in webhooks.listar_endpoints(sesion, credencial.tenant_id)]}
+
+
+@router.get("/webhooks/{endpoint_id}/entregas")
+def entregas_webhook(
+    endpoint_id: str,
+    limite: int = Query(default=50, ge=1, le=200),
+    credencial: CredencialAutenticada = Depends(exigir_permiso("contratos:leer")),
+    sesion: Session = Depends(obtener_sesion),
+):
+    """Historial de entregas, para que el integrador vea que le llego y que fallo."""
+    endpoint = _endpoint_o_404(sesion, credencial.tenant_id, endpoint_id)
+    entregas = webhooks.listar_entregas(sesion, credencial.tenant_id, endpoint.id, limite)
+    return {"endpoint": _endpoint_json(endpoint), "data": [_entrega_json(e) for e in entregas]}
+
+
+@router.post("/webhooks/{endpoint_id}/reactivar")
+def reactivar_webhook(
+    endpoint_id: str,
+    credencial: CredencialAutenticada = Depends(exigir_permiso("contratos:crear")),
+    sesion: Session = Depends(obtener_sesion),
+):
+    """Vuelve a activar un endpoint suspendido por fallos seguidos."""
+    endpoint = _endpoint_o_404(sesion, credencial.tenant_id, endpoint_id)
+    webhooks.reactivar(endpoint)
+    sesion.commit()
+    return _endpoint_json(endpoint)
+
+
+@router.post("/webhooks/entregas/{entrega_id}/reintentar", status_code=status.HTTP_202_ACCEPTED)
+def reintentar_entrega(
+    entrega_id: str,
+    tareas: BackgroundTasks,
+    credencial: CredencialAutenticada = Depends(exigir_permiso("contratos:crear")),
+    sesion: Session = Depends(obtener_sesion),
+):
+    entrega = webhooks.obtener_entrega(sesion, credencial.tenant_id, entrega_id)
+    if entrega is None:
+        raise NoEncontrado("Entrega no encontrada")
+    endpoint = _endpoint_o_404(sesion, credencial.tenant_id, entrega.endpoint_id)
+    try:
+        webhooks.reintentar(entrega, endpoint)
+    except webhooks.EstadoNoPermitido as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error": "estado_invalido", "mensaje": str(error)},
+        ) from error
+    sesion.commit()
+    tareas.add_task(despachar_en_linea)
+    return _entrega_json(entrega)
+
+
 @router.post("/plantillas", status_code=status.HTTP_201_CREATED)
 def crear_plantilla(
     peticion: CrearPlantilla,
@@ -279,64 +476,21 @@ def crear_plantilla(
 ):
     """Crea la plantilla si no existe y publica una version nueva e inmutable."""
     try:
-        schema = validar_schema(peticion.schema_variables)
-        cuerpo = sanitizar_cuerpo(peticion.cuerpo)
+        plantilla, version = servicio.publicar_plantilla(
+            sesion,
+            credencial.tenant_id,
+            codigo=peticion.codigo,
+            nombre=peticion.nombre,
+            titulo=peticion.titulo,
+            cuerpo=peticion.cuerpo,
+            schema_variables=peticion.schema_variables,
+            politica=peticion.politica,
+        )
     except (DatosInvalidos, PlantillaInvalida) as error:
         detalles = getattr(error, "detalles", None)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "plantilla_invalida", "mensaje": str(error), "detalles": detalles},
-        ) from error
-
-    plantilla = sesion.scalars(
-        select(Plantilla).where(
-            Plantilla.tenant_id == credencial.tenant_id, Plantilla.codigo == peticion.codigo
-        )
-    ).first()
-    if plantilla is None:
-        plantilla = Plantilla(
-            tenant_id=credencial.tenant_id, codigo=peticion.codigo, nombre=peticion.nombre
-        )
-        sesion.add(plantilla)
-        sesion.flush()
-
-    ultima = sesion.scalars(
-        select(VersionPlantilla)
-        .where(
-            VersionPlantilla.tenant_id == credencial.tenant_id,
-            VersionPlantilla.plantilla_id == plantilla.id,
-        )
-        .order_by(VersionPlantilla.version.desc())
-        .limit(1)
-    ).first()
-
-    from app.dominio.politica import normalizar as normalizar_politica
-
-    politica = normalizar_politica(peticion.politica)
-    numero = (ultima.version if ultima else 0) + 1
-    version = VersionPlantilla(
-        tenant_id=credencial.tenant_id,
-        plantilla_id=plantilla.id,
-        version=numero,
-        titulo=peticion.titulo,
-        cuerpo=cuerpo,
-        schema_variables=schema,
-        politica=politica,
-        hash_contenido=sha256(
-            json_canonico(
-                {"cuerpo": cuerpo, "schema": schema, "politica": politica,
-                 "titulo": peticion.titulo, "version": numero}
-            )
-        ),
-    )
-    sesion.add(version)
-    sesion.flush()
-    try:
-        servicio.publicar_version(sesion, version)
-    except PlantillaInvalida as error:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": "plantilla_invalida", "mensaje": str(error)},
         ) from error
     sesion.commit()
     return {

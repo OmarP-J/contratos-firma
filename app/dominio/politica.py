@@ -15,6 +15,9 @@ POR_DEFECTO = {
     "requiere_geolocalizacion": False,
     "requiere_firma_empresa": False,
     "horas_vigencia": 72,
+    # Mandar el enlace de firma al firmante por correo o SMS. Apagarlo tiene
+    # sentido si el integrador prefiere entregar el enlace en su propia app.
+    "notificar_invitaciones": True,
 }
 
 
@@ -31,4 +34,5 @@ def normalizar(entrada: Any) -> dict:
         "requiere_geolocalizacion": bool(origen.get("requiere_geolocalizacion", False)),
         "requiere_firma_empresa": bool(origen.get("requiere_firma_empresa", False)),
         "horas_vigencia": max(1, min(horas, 24 * 90)),
+        "notificar_invitaciones": bool(origen.get("notificar_invitaciones", True)),
     }

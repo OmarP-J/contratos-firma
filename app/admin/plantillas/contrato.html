@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block titulo %}{{ contrato.titulo }}{% endblock %}
+{% block contenido %}
+<p><a href="/admin/contratos">&larr; Contratos</a></p>
+<h1>{{ contrato.titulo }} <span class="estado {{ contrato.estado }}">{{ contrato.estado }}</span></h1>
+<p class="sutil mono">{{ contrato.id }}</p>
+
+{% if aviso %}<div class="ok">{{ aviso }}</div>{% endif %}
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+{% if enlace_nuevo %}
+  <div class="ok">Se genero un enlace nuevo y el anterior dejo de servir. Si la politica lo
+  permite, ya se le envio al firmante. Este enlace no se vuelve a mostrar:<br>
+  <span class="mono" id="enlace-nuevo">{{ enlace_nuevo }}</span></div>
+{% endif %}
+
+<div class="tarjeta">
+  <h2>Datos</h2>
+  <dl class="datos">
+    <dt>Referencia</dt><dd>{{ contrato.referencia_externa or '-' }}</dd>
+    <dt>Plantilla</dt><dd>version {{ contrato.numero_version }}</dd>
+    <dt>Creado</dt><dd>{{ contrato.creado_en | fecha }}</dd>
+    <dt>Enviado</dt><dd>{{ contrato.enviado_en | fecha }}</dd>
+    <dt>Vence</dt><dd>{{ contrato.expira_en | fecha }}</dd>
+    <dt>Completado</dt><dd>{{ contrato.completado_en | fecha }}</dd>
+    {% if contrato.motivo_anulacion %}<dt>Motivo de anulacion</dt><dd>{{ contrato.motivo_anulacion }}</dd>{% endif %}
+    <dt>Hash del documento</dt><dd class="mono">{{ contrato.hash_documento }}</dd>
+    {% if contrato.hash_documento_final %}<dt>Hash del final</dt><dd class="mono">{{ contrato.hash_documento_final }}</dd>{% endif %}
+    {% if contrato.hash_documento_final_pdf %}<dt>Hash del PDF</dt><dd class="mono">{{ contrato.hash_documento_final_pdf }}</dd>{% endif %}
+  </dl>
+  <p class="acciones" style="margin-top:1.2rem">
+    <a class="boton secundario" href="/admin/contratos/{{ contrato.id }}/documento" target="_blank" rel="noopener">
+      {{ 'Documento final' if contrato.clave_documento_final else 'Documento presentado' }}</a>
+    {% if contrato.clave_documento_final_pdf %}
+      <a class="boton secundario" href="/admin/contratos/{{ contrato.id }}/documento?formato=pdf" target="_blank" rel="noopener">PDF</a>
+    {% endif %}
+  </p>
+</div>
+
+<div class="tarjeta">
+  <h2>Firmantes</h2>
+  <table>
+    <thead><tr><th>Rol</th><th>Nombre</th><th>Contacto</th><th>Estado</th><th>Firmado</th></tr></thead>
+    <tbody>
+    {% for f in datos.signers %}
+      <tr>
+        <td>{{ 'Empresa' if f.role == 'EMPRESA' else 'Cliente' }}</td>
+        <td>{{ f.name }}</td>
+        <td>{{ f.email or '-' }}</td>
+        <td><span class="estado {{ f.status }}">{{ f.status }}</span>
+            {% if f.decline_reason %}<br><span class="sutil">{{ f.decline_reason }}</span>{% endif %}</td>
+        <td>{{ f.signed_at | fecha }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if se_puede_reenviar or se_puede_anular %}
+<div class="tarjeta">
+  <h2>Acciones</h2>
+  <div class="acciones">
+    {% if se_puede_reenviar %}
+    <form method="post" action="/admin/contratos/{{ contrato.id }}/reenviar">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit" class="secundario">Reenviar enlace de firma</button>
+    </form>
+    {% endif %}
+    {% if se_puede_anular %}
+    <form method="post" action="/admin/contratos/{{ contrato.id }}/anular" class="fila" style="flex:1">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <div><input name="motivo" type="text" maxlength="300" placeholder="Motivo de la anulacion (opcional)"></div>
+      <div style="flex:0"><button type="submit" class="peligro">Anular</button></div>
+    </form>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+<div class="tarjeta">
+  <h2>Linea de auditoria</h2>
+  {% if cadena.integra %}
+    <div class="ok">Cadena integra: ningun evento fue alterado ni eliminado.</div>
+  {% else %}
+    <div class="error">La cadena esta rota en el evento {{ cadena.rota_en }}: alguien modifico la tabla de auditoria.</div>
+  {% endif %}
+  <table>
+    <thead><tr><th>#</th><th>Evento</th><th>Actor</th><th>Fecha</th><th>Hash</th></tr></thead>
+    <tbody>
+    {% for e in eventos %}
+      <tr>
+        <td>{{ e.secuencia }}</td>
+        <td>{{ e.tipo }}</td>
+        <td>{{ e.actor_tipo }}</td>
+        <td>{{ e.creado_en | fecha }}</td>
+        <td class="mono">{{ e.hash[:16] }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

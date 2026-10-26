@@ -84,6 +84,13 @@ def obtener_sesion() -> Iterator[Session]:
 
 
 def crear_tablas() -> None:
+    """
+    Crea las tablas que falten. Solo en desarrollo y pruebas: en produccion el
+    esquema lo gestiona Alembic (alembic upgrade head), y crearlo aqui
+    ocultaria una migracion olvidada hasta el primer error en una consulta.
+    """
+    if ajustes().es_produccion:
+        return
     from app import models  # noqa: F401  (registra los modelos en Base)
 
     Base.metadata.create_all(motor)

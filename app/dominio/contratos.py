@@ -7,22 +7,25 @@ auditar -> completar -> custodiar -> notificar.
 """
 from __future__ import annotations
 
+import base64
+import json
+import logging
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.almacenamiento import almacen, nueva_clave
 from app.config import ajustes
 from app.db import ahora_utc
-from app.dominio import auditoria, documentos, webhooks
+from app.dominio import auditoria, avisos, documentos, pdf, webhooks
 from app.dominio.estados import EVENTO_WEBHOOK, Estado, exigir_transicion
 from app.dominio.firma import SolicitudFirma, proveedor_actual
 from app.dominio.politica import normalizar as normalizar_politica
-from app.dominio.plantillas import validar_coherencia
-from app.dominio.variables import DatosInvalidos, validar_valores
+from app.dominio.plantillas import sanitizar_cuerpo, validar_coherencia
+from app.dominio.variables import DatosInvalidos, validar_schema, validar_valores
 from app.models import (
     Contrato,
     Invitacion,
@@ -34,7 +37,10 @@ from app.models import (
     Firma,
     SesionFirma,
 )
+from app.notificaciones import Mensaje
 from app.seguridad import hash_de_token, json_canonico, sha256, token_aleatorio
+
+registro = logging.getLogger("contratos")
 
 
 class ErrorDeNegocio(Exception):
@@ -98,6 +104,65 @@ def resolver_version(
         detalle = f"version {pedida} de " if pedida is not None else ""
         raise ErrorDeNegocio(f"No hay una {detalle}la plantilla publicada: {referencia}")
     return encontrada
+
+
+def publicar_plantilla(
+    sesion: Session,
+    tenant_id: str,
+    *,
+    codigo: str,
+    nombre: str,
+    titulo: str,
+    cuerpo: str,
+    schema_variables: dict,
+    politica: dict | None = None,
+) -> tuple[Plantilla, VersionPlantilla]:
+    """
+    Crea la plantilla si no existe y publica una version nueva e inmutable.
+    Lanza DatosInvalidos o PlantillaInvalida con el detalle de lo que falla.
+    """
+    schema = validar_schema(schema_variables)
+    cuerpo = sanitizar_cuerpo(cuerpo)
+
+    plantilla = sesion.scalars(
+        select(Plantilla).where(Plantilla.tenant_id == tenant_id, Plantilla.codigo == codigo)
+    ).first()
+    if plantilla is None:
+        plantilla = Plantilla(tenant_id=tenant_id, codigo=codigo, nombre=nombre)
+        sesion.add(plantilla)
+        sesion.flush()
+
+    ultima = sesion.scalars(
+        select(VersionPlantilla)
+        .where(
+            VersionPlantilla.tenant_id == tenant_id,
+            VersionPlantilla.plantilla_id == plantilla.id,
+        )
+        .order_by(VersionPlantilla.version.desc())
+        .limit(1)
+    ).first()
+
+    politica = normalizar_politica(politica)
+    numero = (ultima.version if ultima else 0) + 1
+    version = VersionPlantilla(
+        tenant_id=tenant_id,
+        plantilla_id=plantilla.id,
+        version=numero,
+        titulo=titulo,
+        cuerpo=cuerpo,
+        schema_variables=schema,
+        politica=politica,
+        hash_contenido=sha256(
+            json_canonico(
+                {"cuerpo": cuerpo, "schema": schema, "politica": politica,
+                 "titulo": titulo, "version": numero}
+            )
+        ),
+    )
+    sesion.add(version)
+    sesion.flush()
+    publicar_version(sesion, version)
+    return plantilla, version
 
 
 def publicar_version(sesion: Session, version: VersionPlantilla) -> VersionPlantilla:
@@ -292,6 +357,11 @@ def enviar(sesion: Session, ctx: Contexto, contrato: Contrato) -> str:
         expira_en=ahora_utc() + timedelta(minutes=ajustes().minutos_invitacion),
     )
     sesion.add(invitacion)
+    url = url_de_firma(token)
+
+    aviso = None
+    if (contrato.politica or {}).get("notificar_invitaciones", True):
+        aviso = _avisar_invitacion(sesion, contrato, parte, url, invitacion.expira_en)
 
     auditoria.registrar(
         sesion,
@@ -300,7 +370,7 @@ def enviar(sesion: Session, ctx: Contexto, contrato: Contrato) -> str:
         tipo="INVITACION_CREADA",
         actor_tipo=ctx.actor_tipo,
         actor_id=ctx.actor_id,
-        datos={"parte": parte.id, "rol": parte.rol},
+        datos={"parte": parte.id, "rol": parte.rol, "aviso": aviso},
         ip=ctx.ip,
         agente=ctx.agente,
     )
@@ -317,11 +387,52 @@ def enviar(sesion: Session, ctx: Contexto, contrato: Contrato) -> str:
             },
         )
     sesion.flush()
-    return url_de_firma(token)
+    return url
 
 
 def url_de_firma(token: str) -> str:
     return f"{ajustes().url_publica.rstrip('/')}/firma/{token}"
+
+
+def _avisar_invitacion(
+    sesion: Session, contrato: Contrato, parte: ParteContrato, url: str, expira_en
+) -> str | None:
+    """
+    Le manda el enlace al firmante y devuelve por que canal.
+
+    El enlace del representante de la empresa se crea en el momento en que
+    firma el cliente; sin este aviso solo podria recuperarse reenviando por la
+    API. El aviso se guarda en esta misma transaccion y sale despues (ver
+    dominio/avisos.py).
+    """
+    if parte.email:
+        canal, destino = "EMAIL", parte.email
+    elif parte.telefono:
+        canal, destino = "SMS", parte.telefono
+    else:
+        return None
+
+    tenant = sesion.get(Tenant, contrato.tenant_id)
+    emisor = tenant.nombre if tenant else "La empresa"
+    vence = expira_en.strftime("%d/%m/%Y %H:%M UTC")
+    if canal == "SMS":
+        texto = f"{emisor} te envio un documento para firmar: {url} (vence el {vence})"
+    else:
+        texto = (
+            f"Hola {parte.nombre}:\n\n"
+            f"{emisor} te envio \"{contrato.titulo}\" para que lo revises y lo firmes "
+            f"electronicamente.\n\n{url}\n\n"
+            f"El enlace es personal y vence el {vence}. Si no esperabas este mensaje, "
+            "ignoralo."
+        )
+    avisos.encolar(
+        sesion,
+        tenant_id=contrato.tenant_id,
+        contrato_id=contrato.id,
+        mensaje=Mensaje(canal=canal, destino=destino,
+                        asunto=f"Documento para firmar: {contrato.titulo}", texto=texto),
+    )
+    return canal
 
 
 # ---------------------------------------------------------------------------
@@ -481,6 +592,7 @@ def completar(sesion: Session, ctx: Contexto, contrato: Contrato) -> None:
 
     contrato.clave_documento_final = clave_final
     contrato.hash_documento_final = final.hash
+    hash_pdf = _emitir_pdf(sesion, contrato, final.html)
 
     auditoria.registrar(
         sesion,
@@ -488,7 +600,7 @@ def completar(sesion: Session, ctx: Contexto, contrato: Contrato) -> None:
         contrato_id=contrato.id,
         tipo="COMPLETADO",
         actor_tipo="SISTEMA",
-        datos={"hash_documento_final": final.hash},
+        datos={"hash_documento_final": final.hash, "hash_documento_final_pdf": hash_pdf},
     )
     webhooks.encolar(
         sesion,
@@ -499,8 +611,36 @@ def completar(sesion: Session, ctx: Contexto, contrato: Contrato) -> None:
             "status": contrato.estado,
             "external_reference": contrato.referencia_externa,
             "document_hash": final.hash,
+            "document_pdf_hash": hash_pdf,
         },
     )
+
+
+def _emitir_pdf(sesion: Session, contrato: Contrato, html_final: str) -> str | None:
+    """
+    Guarda la version PDF del documento final y devuelve su hash.
+
+    Si la conversion falla, el contrato se completa igual y queda constancia
+    en la auditoria: el documento de referencia es el HTML, y perder firmas
+    ya hechas por un problema de maquetacion seria mucho peor.
+    """
+    try:
+        datos = pdf.html_a_pdf(html_final, titulo=contrato.titulo)
+    except Exception:
+        registro.exception("no se pudo generar el PDF del contrato %s", contrato.id)
+        auditoria.registrar(
+            sesion,
+            tenant_id=contrato.tenant_id,
+            contrato_id=contrato.id,
+            tipo="PDF_NO_GENERADO",
+            actor_tipo="SISTEMA",
+        )
+        return None
+    clave = nueva_clave(contrato.tenant_id, contrato.id, "final.pdf")
+    almacen.guardar(clave, datos)
+    contrato.clave_documento_final_pdf = clave
+    contrato.hash_documento_final_pdf = sha256(datos)
+    return contrato.hash_documento_final_pdf
 
 
 def rechazar(
@@ -673,6 +813,95 @@ def obtener(sesion: Session, tenant_id: str, contrato_id: str) -> Contrato:
     return contrato
 
 
+def listar(
+    sesion: Session,
+    tenant_id: str,
+    *,
+    estado: str | None = None,
+    estados: tuple[str, ...] | None = None,
+    referencia_externa: str | None = None,
+    creado_desde: datetime | None = None,
+    creado_hasta: datetime | None = None,
+    despues_de: tuple[datetime, str] | None = None,
+    limite: int = 50,
+) -> list[Contrato]:
+    """
+    Contratos de la empresa, del mas nuevo al mas viejo.
+
+    Pagina por cursor (fecha de creacion + id) y no por desplazamiento: si
+    entran contratos nuevos mientras el integrador recorre las paginas, no se
+    le repiten ni se le saltan filas.
+    """
+    consulta = select(Contrato).where(Contrato.tenant_id == tenant_id)
+    if estado:
+        consulta = consulta.where(Contrato.estado == estado)
+    if estados:
+        consulta = consulta.where(Contrato.estado.in_(estados))
+    if referencia_externa:
+        consulta = consulta.where(Contrato.referencia_externa == referencia_externa)
+    if creado_desde:
+        consulta = consulta.where(Contrato.creado_en >= creado_desde)
+    if creado_hasta:
+        consulta = consulta.where(Contrato.creado_en < creado_hasta)
+    if despues_de:
+        fecha, ultimo_id = despues_de
+        consulta = consulta.where(
+            or_(
+                Contrato.creado_en < fecha,
+                and_(Contrato.creado_en == fecha, Contrato.id < ultimo_id),
+            )
+        )
+    return list(
+        sesion.scalars(
+            consulta.order_by(Contrato.creado_en.desc(), Contrato.id.desc()).limit(limite)
+        )
+    )
+
+
+def cursor_de(contrato: Contrato) -> str:
+    """El cursor que apunta justo despues de este contrato en el listado."""
+    crudo = json.dumps({"c": contrato.creado_en.isoformat(), "i": contrato.id})
+    return base64.urlsafe_b64encode(crudo.encode()).decode().rstrip("=")
+
+
+def leer_cursor(cursor: str) -> tuple[datetime, str]:
+    """Lanza ValueError si el cursor no es uno que hayamos emitido."""
+    try:
+        relleno = "=" * (-len(cursor) % 4)
+        datos = json.loads(base64.urlsafe_b64decode(cursor + relleno))
+        fecha = datetime.fromisoformat(datos["c"])
+        identificador = str(datos["i"])
+    except (ValueError, KeyError, TypeError) as error:
+        raise ValueError("El cursor no es valido") from error
+    if fecha.tzinfo is None:
+        raise ValueError("El cursor no es valido")
+    return fecha, identificador
+
+
+def contar_por_estado(sesion: Session, tenant_id: str) -> dict[str, int]:
+    filas = sesion.execute(
+        select(Contrato.estado, func.count())
+        .where(Contrato.tenant_id == tenant_id)
+        .group_by(Contrato.estado)
+    )
+    return {estado: cuantos for estado, cuantos in filas}
+
+
+def resumen_json(contrato: Contrato) -> dict[str, Any]:
+    """La version corta de como_json, para listados: sin firmantes."""
+    return {
+        "contract_id": contrato.id,
+        "status": contrato.estado,
+        "title": contrato.titulo,
+        "external_reference": contrato.referencia_externa,
+        "template_version": contrato.numero_version,
+        "created_at": documentos.iso(contrato.creado_en),
+        "sent_at": documentos.iso(contrato.enviado_en),
+        "completed_at": documentos.iso(contrato.completado_en),
+        "expires_at": documentos.iso(contrato.expira_en),
+    }
+
+
 def como_json(sesion: Session, contrato: Contrato) -> dict[str, Any]:
     partes = sesion.scalars(
         select(ParteContrato)
@@ -691,6 +920,7 @@ def como_json(sesion: Session, contrato: Contrato) -> dict[str, Any]:
         "variables_hash": contrato.hash_variables,
         "document_hash": contrato.hash_documento,
         "final_document_hash": contrato.hash_documento_final,
+        "final_document_pdf_hash": contrato.hash_documento_final_pdf,
         "created_at": documentos.iso(contrato.creado_en),
         "sent_at": documentos.iso(contrato.enviado_en),
         "completed_at": documentos.iso(contrato.completado_en),

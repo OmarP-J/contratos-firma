@@ -19,7 +19,8 @@ from app.dominio.plantillas import renderizar
 from app.seguridad import json_canonico, sha256
 
 ESTILOS = """
-body { font-family: Georgia, 'Times New Roman', serif; font-size: 11pt; color: #14151a;
+:root { color-scheme: light; }
+body { background: #fff; font-family: Georgia, 'Times New Roman', serif; font-size: 11pt; color: #14151a;
        line-height: 1.6; max-width: 46rem; margin: 0 auto; padding: 2.5rem 1.5rem; }
 h1 { font-size: 1.5rem; text-align: center; margin: 0 0 1.5rem; }
 h2 { font-size: 1.1rem; margin: 1.6rem 0 .5rem; }

@@ -12,7 +12,16 @@ import secrets
 from datetime import timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
@@ -26,6 +35,7 @@ from app.dependencias import ip_observada, limitar
 from app.dominio import auditoria, contratos as servicio, webhooks
 from app.dominio.contratos import Contexto, ErrorDeNegocio
 from app.dominio.estados import TransicionInvalida
+from app.tareas import despachar_en_linea
 from app.models import Contrato, DesafioOtp, Invitacion, ParteContrato, SesionFirma
 from app.notificaciones import ErrorDeEnvio, Mensaje
 from app.seguridad import (
@@ -92,7 +102,7 @@ def resolver_acceso(
         # aplica igual en cuanto alguien intenta usar el enlace.
         servicio.vencer(sesion, contrato)
         sesion.commit()
-        webhooks.procesar_pendientes()
+        webhooks.entregar_en_linea()
         raise _error("Este contrato ya vencio.")
 
     sesion_firma = sesion.scalars(
@@ -159,7 +169,10 @@ def _base(request: Request, acceso: Acceso) -> dict:
 # ---------------------------------------------------------------------------
 
 @router.get("/{token}", response_class=HTMLResponse)
-def abrir(token: str, request: Request, sesion: Session = Depends(obtener_sesion)):
+def abrir(
+    token: str, request: Request, tareas: BackgroundTasks,
+    sesion: Session = Depends(obtener_sesion),
+):
     acceso = resolver_acceso(token, request, sesion)
     if acceso.invitacion.abierta_en is None:
         acceso.invitacion.abierta_en = ahora_utc()
@@ -181,6 +194,7 @@ def abrir(token: str, request: Request, sesion: Session = Depends(obtener_sesion
             datos={"status": acceso.contrato.estado,
                    "external_reference": acceso.contrato.referencia_externa},
         )
+        tareas.add_task(despachar_en_linea)
     sesion.commit()
 
     if acceso.sesion_firma.autenticada or not (acceso.contrato.politica or {}).get("requiere_otp", True):
@@ -192,6 +206,22 @@ def abrir(token: str, request: Request, sesion: Session = Depends(obtener_sesion
 # Paso 2: identificacion con codigo de un solo uso
 # ---------------------------------------------------------------------------
 
+def canal_otp(parte: ParteContrato, politica: dict) -> tuple[str, str] | None:
+    """
+    Por donde va el codigo: el canal que pide la politica congelada en el
+    contrato si el firmante tiene ese dato, y si no el otro. El canal usado
+    queda en la evidencia (OTP_EMAIL u OTP_SMS), asi que el respaldo no pasa
+    desapercibido.
+    """
+    opciones = [("EMAIL", parte.email), ("SMS", parte.telefono)]
+    if politica.get("canal_otp") == "SMS":
+        opciones.reverse()
+    for canal, destino in opciones:
+        if destino:
+            return canal, destino
+    return None
+
+
 @router.post("/{token}/codigo", response_class=HTMLResponse)
 def solicitar_codigo(
     token: str, request: Request, csrf: str = Form(default=""),
@@ -199,9 +229,10 @@ def solicitar_codigo(
 ):
     acceso = resolver_acceso(token, request, sesion, crear_sesion=False)
     exigir_csrf(acceso, csrf)
-    destino = acceso.parte.email or acceso.parte.telefono
-    if not destino:
+    elegido = canal_otp(acceso.parte, acceso.contrato.politica or {})
+    if elegido is None:
         raise _error("Este firmante no tiene correo ni telefono para enviarle el codigo.")
+    canal, destino = elegido
 
     limitar(f"otp:{acceso.parte.id}", limite=5, ventana_s=15 * 60)
 
@@ -209,7 +240,7 @@ def solicitar_codigo(
     desafio = DesafioOtp(
         tenant_id=acceso.contrato.tenant_id,
         sesion_id=acceso.sesion_firma.id,
-        canal="EMAIL" if acceso.parte.email else "SMS",
+        canal=canal,
         destino_enmascarado=enmascarar(destino),
         # Nunca se guarda el codigo en claro.
         codigo_hash=sha256(codigo),
@@ -370,7 +401,13 @@ def contenido_contrato(token: str, request: Request, sesion: Session = Depends(o
         content=contenido,
         media_type="text/html; charset=utf-8",
         headers={
-            "Content-Security-Policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'",
+            # Solo se puede enmarcar desde nuestra propia pagina de firma. Sin
+            # esto el middleware pone X-Frame-Options: DENY y el navegador deja
+            # el marco en blanco: el firmante no veria lo que firma.
+            "Content-Security-Policy": (
+                "sandbox; default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'self'"
+            ),
+            "X-Frame-Options": "SAMEORIGIN",
             "X-Content-Type-Options": "nosniff",
         },
     )
@@ -380,6 +417,7 @@ def contenido_contrato(token: str, request: Request, sesion: Session = Depends(o
 def firmar(
     token: str,
     request: Request,
+    tareas: BackgroundTasks,
     csrf: str = Form(default=""),
     acepto: str = Form(default=""),
     latitud: str = Form(default=""),
@@ -448,7 +486,7 @@ def firmar(
 
     acceso.invitacion.estado = "USADA"
     sesion.commit()
-    webhooks.procesar_pendientes()
+    tareas.add_task(despachar_en_linea)
     return RedirectResponse(f"/firma/{token}/listo", status_code=303)
 
 
@@ -456,6 +494,7 @@ def firmar(
 def rechazar(
     token: str,
     request: Request,
+    tareas: BackgroundTasks,
     csrf: str = Form(default=""),
     motivo: str = Form(default=""),
     sesion: Session = Depends(obtener_sesion),
@@ -484,7 +523,7 @@ def rechazar(
         return plantillas.TemplateResponse(request, "documento.html", contexto, status_code=409)
 
     sesion.commit()
-    webhooks.procesar_pendientes()
+    tareas.add_task(despachar_en_linea)
     return RedirectResponse(f"/firma/{token}/listo", status_code=303)
 
 

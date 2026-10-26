@@ -37,6 +37,7 @@ def receptor_webhook():
                 "firma": self.headers.get("x-signature"),
                 "marca": self.headers.get("x-timestamp"),
                 "evento_id": self.headers.get("x-event-id"),
+                "host": self.headers.get("host"),
             })
             self.send_response(200)
             self.end_headers()

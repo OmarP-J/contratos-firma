@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block titulo %}Publicar plantilla{% endblock %}
+{% block contenido %}
+<p><a href="/admin/plantillas">&larr; Plantillas</a></p>
+<h1>Publicar plantilla</h1>
+<p class="sutil">Si el codigo ya existe, se publica una version nueva de esa plantilla. La unica
+sintaxis es <span class="mono">{{ '{{ variable }}' }}</span> y cada variable tiene que estar declarada
+en el schema.</p>
+
+{% if error %}
+<div class="error">{{ error }}
+  {% if detalles %}<ul>{% for campo, problema in detalles.items() %}<li><span class="mono">{{ campo }}</span>: {{ problema }}</li>{% endfor %}</ul>{% endif %}
+</div>
+{% endif %}
+
+<form method="post" action="/admin/plantillas" class="tarjeta">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <div class="fila">
+    <div><label for="codigo">Codigo</label>
+      <input id="codigo" name="codigo" type="text" value="{{ f.codigo or '' }}" placeholder="contrato_servicio" required></div>
+    <div><label for="nombre">Nombre interno</label>
+      <input id="nombre" name="nombre" type="text" value="{{ f.nombre or '' }}" required></div>
+    <div><label for="titulo">Titulo del documento</label>
+      <input id="titulo" name="titulo" type="text" value="{{ f.titulo or '' }}" required></div>
+  </div>
+  <label for="cuerpo">Cuerpo (HTML de la lista blanca)</label>
+  <textarea id="cuerpo" name="cuerpo" rows="14" required>{{ f.cuerpo or '' }}</textarea>
+  <div class="fila">
+    <div><label for="schema_variables">Schema de variables (JSON)</label>
+      <textarea id="schema_variables" name="schema_variables" rows="10">{{ f.schema_variables or '{}' }}</textarea></div>
+    <div><label for="politica">Politica de firma (JSON)</label>
+      <textarea id="politica" name="politica" rows="10">{{ f.politica or '' }}</textarea></div>
+  </div>
+  <p></p>
+  <button type="submit">Publicar</button>
+</form>
+{% endblock %}

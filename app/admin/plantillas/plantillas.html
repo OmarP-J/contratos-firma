@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block titulo %}Plantillas{% endblock %}
+{% block contenido %}
+<div class="fila" style="align-items:center">
+  <div><h1>Plantillas</h1>
+  <p class="sutil">Cada version publicada es inmutable: los contratos ya emitidos siguen atados a la suya.</p></div>
+  <div style="flex:0"><a class="boton" href="/admin/plantillas/nueva">Nueva plantilla</a></div>
+</div>
+{% if aviso %}<div class="ok">{{ aviso }}</div>{% endif %}
+
+{% for plantilla, versiones in plantillas %}
+<div class="tarjeta">
+  <div class="fila" style="align-items:center">
+    <div><h2 style="margin:0">{{ plantilla.nombre }}</h2>
+    <span class="mono sutil">{{ plantilla.codigo }}</span></div>
+    <div style="flex:0"><a class="boton secundario" href="/admin/plantillas/nueva?desde={{ plantilla.id }}">Publicar version nueva</a></div>
+  </div>
+  <table style="margin-top:1rem">
+    <thead><tr><th>Version</th><th>Titulo</th><th>Estado</th><th>Publicada</th><th>Hash del contenido</th></tr></thead>
+    <tbody>
+    {% for v in versiones %}
+      <tr>
+        <td>{{ v.version }}</td>
+        <td>{{ v.titulo }}</td>
+        <td><span class="estado {{ v.estado }}">{{ v.estado }}</span></td>
+        <td>{{ v.publicada_en | fecha }}</td>
+        <td class="mono">{{ v.hash_contenido[:16] }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="tarjeta"><p class="sutil">Todavia no hay plantillas.</p></div>
+{% endfor %}
+{% endblock %}

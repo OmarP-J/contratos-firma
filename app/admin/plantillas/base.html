@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block titulo %}Administracion{% endblock %} · Contratos</title>
+<style>
+  :root { color-scheme: light; --tinta: #16171d; --sutil: #5e6070; --borde: #e2e2ea;
+          --fondo: #f4f4f7; --primario: #2f3f96; --peligro: #b3261e; --ok: #1c7a5b; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--fondo); color: var(--tinta); line-height: 1.55;
+         font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 15px; }
+  a { color: var(--primario); }
+  .marco { max-width: 26rem; margin: 0 auto; padding: 4rem 1.25rem; }
+  .marco-ancho { max-width: 72rem; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
+  .barra { background: #fff; border-bottom: 1px solid var(--borde); }
+  .barra-interior { display: flex; align-items: center; gap: 1.5rem; padding-top: .8rem;
+                    padding-bottom: .8rem; flex-wrap: wrap; }
+  .barra nav { display: flex; gap: 1.1rem; flex: 1; }
+  .barra nav a { text-decoration: none; color: var(--sutil); font-weight: 600; }
+  .barra nav a.activo { color: var(--primario); }
+  .barra form { display: flex; align-items: center; gap: .7rem; margin: 0; }
+  .tarjeta { background: #fff; border: 1px solid var(--borde); border-radius: 10px;
+             padding: 1.4rem; margin-bottom: 1.25rem; }
+  h1 { font-size: 1.4rem; margin: 0 0 .3rem; }
+  h2 { font-size: 1.05rem; margin: 0 0 .8rem; }
+  .sutil { color: var(--sutil); font-size: .9rem; }
+  label { display: block; font-weight: 600; margin: .9rem 0 .3rem; font-size: .9rem; }
+  input[type=text], input[type=email], input[type=password], select, textarea {
+    width: 100%; padding: .6rem .7rem; font: inherit; border: 1px solid #c4c4d0;
+    border-radius: 6px; background: #fff; }
+  textarea { font-family: ui-monospace, Consolas, monospace; font-size: .85rem; resize: vertical; }
+  .codigo-otp { letter-spacing: .3em; font-size: 1.3rem; text-align: center; }
+  button, .boton { display: inline-block; background: var(--primario); color: #fff; border: 0;
+    border-radius: 6px; padding: .6rem 1.1rem; font: inherit; font-weight: 600; cursor: pointer;
+    text-decoration: none; }
+  button.secundario, .boton.secundario { background: #fff; color: var(--primario);
+    border: 1px solid #c4c4d0; }
+  button.peligro { background: var(--peligro); }
+  button.enlace { background: none; color: var(--primario); padding: 0; font-weight: 600; }
+  .error { background: #fdeaea; border-left: 3px solid var(--peligro); padding: .7rem 1rem;
+           border-radius: 4px; margin-bottom: 1rem; }
+  .aviso { background: #eef1fb; border-left: 3px solid var(--primario); padding: .7rem 1rem;
+           border-radius: 4px; margin-bottom: 1rem; }
+  .ok { background: #e7f4ee; border-left: 3px solid var(--ok); padding: .7rem 1rem;
+        border-radius: 4px; margin-bottom: 1rem; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  th, td { text-align: left; padding: .55rem .6rem; border-bottom: 1px solid var(--borde);
+           vertical-align: top; }
+  th { color: var(--sutil); font-weight: 600; font-size: .8rem; text-transform: uppercase;
+       letter-spacing: .03em; }
+  .mono { font-family: ui-monospace, Consolas, monospace; font-size: .82rem; word-break: break-all; }
+  .estado { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .75rem;
+            font-weight: 700; background: #ececf2; color: var(--sutil); white-space: nowrap; }
+  .estado.PENDIENTE_CLIENTE, .estado.PENDIENTE_EMPRESA, .estado.PENDIENTE, .estado.CREADO {
+    background: #fff4dc; color: #8a5a00; }
+  .estado.COMPLETADO, .estado.FIRMADA, .estado.ACTIVA, .estado.PUBLICADA { background: #e7f4ee; color: var(--ok); }
+  .estado.RECHAZADO, .estado.RECHAZADA, .estado.ANULADO, .estado.REVOCADA { background: #fdeaea; color: var(--peligro); }
+  .pestanas { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: 1rem; }
+  .pestanas a { padding: .35rem .8rem; border-radius: 999px; text-decoration: none;
+                color: var(--sutil); border: 1px solid var(--borde); background: #fff; font-size: .88rem; }
+  .pestanas a.activo { background: var(--primario); border-color: var(--primario); color: #fff; }
+  .fila { display: flex; gap: 1rem; align-items: flex-end; flex-wrap: wrap; }
+  .fila > * { flex: 1; min-width: 12rem; }
+  .acciones { display: flex; gap: .6rem; flex-wrap: wrap; align-items: flex-start; }
+  .acciones form { margin: 0; }
+  dl.datos { display: grid; grid-template-columns: 12rem 1fr; gap: .35rem 1rem; margin: 0; }
+  dl.datos dt { color: var(--sutil); }
+  dl.datos dd { margin: 0; }
+  .qr svg { display: block; margin: .5rem 0; }
+  .secreto { font-family: ui-monospace, Consolas, monospace; font-size: 1.05rem; letter-spacing: .05em;
+             background: var(--fondo); padding: .5rem .7rem; border-radius: 6px; display: inline-block; }
+  @media (max-width: 640px) { dl.datos { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+{% if admin and admin.sesion_admin.mfa_verificada %}
+<header class="barra">
+  <div class="marco-ancho barra-interior" style="padding-bottom:.8rem">
+    <strong>{{ admin.tenant.nombre }}</strong>
+    <nav>
+      {% set ruta = request.url.path %}
+      <a href="/admin/contratos" class="{{ 'activo' if ruta.startswith('/admin/contratos') }}">Contratos</a>
+      <a href="/admin/plantillas" class="{{ 'activo' if ruta.startswith('/admin/plantillas') }}">Plantillas</a>
+      <a href="/admin/credenciales" class="{{ 'activo' if ruta.startswith('/admin/credenciales') }}">Credenciales</a>
+    </nav>
+    <form method="post" action="/admin/salir">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <span class="sutil">{{ admin.usuario.nombre }}</span>
+      <button type="submit" class="enlace">Salir</button>
+    </form>
+  </div>
+</header>
+{% endif %}
+{% block cuerpo %}<main class="marco-ancho">{% block contenido %}{% endblock %}</main>{% endblock %}
+</body>
+</html>

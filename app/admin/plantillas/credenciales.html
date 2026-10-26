@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block titulo %}Credenciales{% endblock %}
+{% block contenido %}
+<h1>Credenciales de la API</h1>
+<p class="sutil">Con estas credenciales se autentican tus sistemas contra la API. El secreto solo se
+muestra al crearla; si se pierde, se crea otra y se revoca la vieja.</p>
+{% if aviso %}<div class="ok">{{ aviso }}</div>{% endif %}
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+<div class="tarjeta">
+  <table>
+    <thead><tr><th>Nombre</th><th>client_id</th><th>Permisos</th><th>Estado</th><th>Ultimo uso</th><th></th></tr></thead>
+    <tbody>
+    {% for c in credenciales %}
+      <tr>
+        <td>{{ c.nombre }}</td>
+        <td class="mono">{{ c.client_id }}</td>
+        <td>{{ c.permisos | join(', ') }}</td>
+        <td><span class="estado {{ c.estado }}">{{ c.estado }}</span></td>
+        <td>{{ c.ultimo_uso_en | fecha }}</td>
+        <td>
+          {% if c.estado == 'ACTIVA' %}
+          <form method="post" action="/admin/credenciales/{{ c.id }}/revocar">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit" class="enlace" style="color:#b3261e">Revocar</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="6" class="sutil">Todavia no hay credenciales.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<form method="post" action="/admin/credenciales" class="tarjeta">
+  <h2>Nueva credencial</h2>
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label for="nombre">Nombre (para reconocerla)</label>
+  <input id="nombre" name="nombre" type="text" placeholder="CRM de ventas" required>
+  <label>Permisos</label>
+  {% for p in permisos %}
+    <label style="font-weight:400;margin:.2rem 0"><input type="checkbox" name="permisos" value="{{ p }}"> <span class="mono">{{ p }}</span></label>
+  {% endfor %}
+  <p></p>
+  <button type="submit">Crear credencial</button>
+</form>
+{% endblock %}

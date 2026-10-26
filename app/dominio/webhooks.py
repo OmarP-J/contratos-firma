@@ -10,7 +10,9 @@ Tres cosas importan aqui:
    cuerpo, para que el receptor compruebe que viene de nosotros y que no es un
    reenvio antiguo.
 3. Entrega. Hay reintentos con espera progresiva e historial, porque el
-   receptor puede estar caido justo cuando se completa un contrato.
+   receptor puede estar caido justo cuando se completa un contrato. La
+   entrega es "al menos una vez": el receptor debe ignorar un X-Event-Id que
+   ya proceso.
 """
 from __future__ import annotations
 
@@ -18,10 +20,10 @@ import ipaddress
 import socket
 from datetime import timedelta
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.config import ajustes
@@ -43,9 +45,22 @@ EVENTOS = [
 MAX_INTENTOS = 6
 TIMEOUT_SEGUNDOS = 8.0
 
+# EN_CURSO tambien se puede reclamar: es una entrega cuyo proceso murio y
+# cuya reserva ya vencio.
+ESTADOS_RECLAMABLES = ("PENDIENTE", "EN_CURSO")
+RESERVA = timedelta(seconds=TIMEOUT_SEGUNDOS * 4)
+
+# Fallos seguidos, entre todas sus entregas, a partir de los cuales un
+# endpoint se suspende y deja de recibir eventos nuevos.
+FALLOS_PARA_SUSPENDER = 15
+
 
 class DestinoNoPermitido(Exception):
     pass
+
+
+class EstadoNoPermitido(Exception):
+    """La operacion no tiene sentido en el estado actual del endpoint o la entrega."""
 
 
 def validar_destino(url: str) -> list[str]:
@@ -53,9 +68,9 @@ def validar_destino(url: str) -> list[str]:
     Comprueba que la URL de webhook apunte a Internet publico.
 
     Se aplica al registrar el endpoint y otra vez justo antes de cada entrega,
-    porque el DNS puede cambiar entre ambos momentos. El pinning de la IP
-    resuelta queda como mejora pendiente; mientras tanto, revalidar y no seguir
-    redirecciones cubre los vectores habituales.
+    porque el DNS puede cambiar entre ambos momentos. Devuelve las IPs
+    validadas, en el orden en que las dio el DNS: la entrega se conecta a una
+    de ellas y no vuelve a resolver el nombre.
     """
     partes = urlparse(url)
     permitir_privado = ajustes().permitir_webhook_privado
@@ -67,12 +82,13 @@ def validar_destino(url: str) -> list[str]:
     if not partes.hostname:
         raise DestinoNoPermitido("La URL del webhook no tiene host")
 
+    puerto = partes.port or (443 if partes.scheme == "https" else 80)
     try:
-        resueltas = socket.getaddrinfo(partes.hostname, partes.port or 443, proto=socket.IPPROTO_TCP)
+        resueltas = socket.getaddrinfo(partes.hostname, puerto, proto=socket.IPPROTO_TCP)
     except socket.gaierror as error:
         raise DestinoNoPermitido("No se pudo resolver el host del webhook") from error
 
-    direcciones = sorted({info[4][0] for info in resueltas})
+    direcciones = list(dict.fromkeys(info[4][0] for info in resueltas))
     if not direcciones:
         raise DestinoNoPermitido("El host del webhook no resuelve a ninguna IP")
 
@@ -151,73 +167,178 @@ def _espera(intento: int) -> timedelta:
     return timedelta(seconds=escala[min(intento - 1, len(escala) - 1)])
 
 
+def entregar_en_linea() -> int:
+    """
+    Entrega lo pendiente desde el propio proceso de la API, salvo que la
+    configuracion lo deje todo para el proceso de tareas periodicas.
+    """
+    if not ajustes().entregar_webhooks_en_linea:
+        return 0
+    return procesar_pendientes()
+
+
 def procesar_pendientes(limite: int = 20) -> int:
     """
-    Intenta entregar lo que este pendiente. Se llama despues de encolar y
-    puede llamarse tambien desde una tarea periodica.
+    Intenta entregar lo que este pendiente. Lo llaman la API (despues de
+    responder) y el proceso de tareas periodicas.
+
+    Puede correr en varios procesos a la vez: cada entrega se reclama con un
+    UPDATE condicional antes de enviarla, asi que dos procesos no mandan la
+    misma. Si un proceso muere a mitad de una entrega, la reserva vence y
+    otro la retoma.
     """
     entregadas = 0
-    with FabricaSesion() as sesion:
-        pendientes = sesion.scalars(
-            select(EntregaWebhook)
-            .where(
-                EntregaWebhook.estado == "PENDIENTE",
-                EntregaWebhook.proximo_intento_en <= ahora_utc(),
-            )
-            .order_by(EntregaWebhook.creada_en)
-            .limit(limite)
-        ).all()
-
-        for entrega in pendientes:
-            endpoint = sesion.get(EndpointWebhook, entrega.endpoint_id)
-            if endpoint is None or endpoint.estado != "ACTIVO":
-                entrega.estado = "ABANDONADA"
-                entrega.ultimo_error = "endpoint inactivo"
-                continue
-            if _intentar(sesion, entrega, endpoint):
-                entregadas += 1
-        sesion.commit()
+    for entrega_id in _candidatas(limite):
+        if reclamar(entrega_id) and _entregar(entrega_id):
+            entregadas += 1
     return entregadas
 
 
-def _intentar(sesion: Session, entrega: EntregaWebhook, endpoint: EndpointWebhook) -> bool:
-    intento = entrega.intentos + 1
-    cuerpo = json_canonico(entrega.payload)
+def _candidatas(limite: int) -> list[str]:
+    with FabricaSesion() as sesion:
+        return list(
+            sesion.scalars(
+                select(EntregaWebhook.id)
+                .where(
+                    EntregaWebhook.estado.in_(ESTADOS_RECLAMABLES),
+                    EntregaWebhook.proximo_intento_en <= ahora_utc(),
+                )
+                .order_by(EntregaWebhook.proximo_intento_en)
+                .limit(limite)
+            )
+        )
+
+
+def reclamar(entrega_id: str) -> bool:
+    """
+    Toma la entrega para este proceso. Si otro la tomo primero, el UPDATE no
+    encuentra la fila en el estado esperado y devuelve 0 filas. Funciona igual
+    en SQLite y en PostgreSQL, sin bloqueos de fila explicitos.
+    """
+    ahora = ahora_utc()
+    with FabricaSesion() as sesion:
+        resultado = sesion.execute(
+            update(EntregaWebhook)
+            .where(
+                EntregaWebhook.id == entrega_id,
+                EntregaWebhook.estado.in_(ESTADOS_RECLAMABLES),
+                EntregaWebhook.proximo_intento_en <= ahora,
+            )
+            .values(estado="EN_CURSO", proximo_intento_en=ahora + RESERVA)
+        )
+        sesion.commit()
+        return resultado.rowcount == 1
+
+
+def _entregar(entrega_id: str) -> bool:
+    with FabricaSesion() as sesion:
+        entrega = sesion.get(EntregaWebhook, entrega_id)
+        endpoint = sesion.get(EndpointWebhook, entrega.endpoint_id)
+        if endpoint is None or endpoint.estado != "ACTIVO":
+            entrega.estado = "ABANDONADA"
+            entrega.ultimo_error = "endpoint inactivo"
+            sesion.commit()
+            return False
+        # Se copia lo necesario y se suelta la conexion antes de salir a la
+        # red: un receptor lento no debe retener conexiones de la base.
+        url, secreto_cifrado = endpoint.url, endpoint.secreto_cifrado
+        payload, evento_id, tipo = entrega.payload, entrega.evento_id, entrega.tipo_evento
+
+    codigo, error = _enviar(url, secreto_cifrado, payload, evento_id, tipo)
+
+    with FabricaSesion() as sesion:
+        entrega = sesion.get(EntregaWebhook, entrega_id)
+        endpoint = sesion.get(EndpointWebhook, entrega.endpoint_id)
+        intento = entrega.intentos + 1
+        if error is None:
+            entrega.estado = "ENTREGADA"
+            entrega.intentos = intento
+            entrega.entregada_en = ahora_utc()
+            entrega.ultimo_codigo = codigo
+            entrega.ultimo_error = None
+            endpoint.fallos_consecutivos = 0
+        else:
+            _fallo(entrega, endpoint, intento, error, codigo)
+        sesion.commit()
+    return error is None
+
+
+def _enviar(
+    url: str, secreto_cifrado: str, payload: dict, evento_id: str, tipo: str
+) -> tuple[int | None, str | None]:
+    """Hace la peticion. Devuelve (codigo HTTP, error); error es None si se entrego."""
+    cuerpo = json_canonico(payload)
     try:
         # Revalidacion justo antes de enviar: el DNS pudo cambiar desde el registro.
-        validar_destino(endpoint.url)
+        direcciones = validar_destino(url)
         marca = str(int(ahora_utc().timestamp()))
-        firma = hmac_sha256(descifrar(endpoint.secreto_cifrado), f"{marca}.{cuerpo}")
+        firma = hmac_sha256(descifrar(secreto_cifrado), f"{marca}.{cuerpo}")
 
-        respuesta = httpx.post(
-            endpoint.url,
-            content=cuerpo.encode("utf-8"),
-            headers={
+        respuesta = _publicar_fijado(
+            url,
+            direcciones,
+            cuerpo.encode("utf-8"),
+            {
                 "content-type": "application/json",
                 "user-agent": "servicio-contratos-firma/1.0",
                 "x-signature": f"sha256={firma}",
                 "x-timestamp": marca,
-                "x-event-id": entrega.evento_id,
-                "x-event-type": entrega.tipo_evento,
+                "x-event-id": evento_id,
+                "x-event-type": tipo,
             },
-            timeout=TIMEOUT_SEGUNDOS,
-            # Seguir redirecciones es un vector clasico de SSRF: el destino
-            # responde 302 hacia una IP interna y nos lleva de la mano.
-            follow_redirects=False,
         )
-        if 200 <= respuesta.status_code < 300:
-            entrega.estado = "ENTREGADA"
-            entrega.intentos = intento
-            entrega.entregada_en = ahora_utc()
-            entrega.ultimo_codigo = respuesta.status_code
-            entrega.ultimo_error = None
-            endpoint.fallos_consecutivos = 0
-            return True
-        _fallo(entrega, endpoint, intento, f"HTTP {respuesta.status_code}", respuesta.status_code)
-        return False
     except Exception as error:
-        _fallo(entrega, endpoint, intento, str(error)[:300], None)
-        return False
+        return None, str(error)[:300]
+    if 200 <= respuesta.status_code < 300:
+        return respuesta.status_code, None
+    return respuesta.status_code, f"HTTP {respuesta.status_code}"
+
+
+# Solo para pruebas: permite inspeccionar las peticiones sin salir a la red.
+_transporte: httpx.BaseTransport | None = None
+
+
+def _url_hacia(url: str, ip: str) -> str:
+    """La misma URL, con la IP ya validada en lugar del nombre."""
+    partes = urlparse(url)
+    host = f"[{ip}]" if ":" in ip else ip
+    return urlunparse(partes._replace(netloc=f"{host}:{partes.port}" if partes.port else host))
+
+
+def _publicar_fijado(
+    url: str, direcciones: list[str], contenido: bytes, cabeceras: dict[str, str]
+) -> httpx.Response:
+    """
+    Se conecta a una IP que ya paso la validacion, no a lo que diga el DNS un
+    instante despues.
+
+    Sin esto, quien controle el DNS del dominio puede responder una IP publica
+    al validar y 127.0.0.1 al conectar (DNS rebinding). El nombre original
+    viaja en la cabecera Host y en el SNI de TLS, asi que el receptor y la
+    verificacion del certificado siguen viendo su dominio.
+    """
+    partes = urlparse(url)
+    ultimo_error: Exception | None = None
+    with httpx.Client(
+        timeout=TIMEOUT_SEGUNDOS,
+        # Seguir redirecciones es un vector clasico de SSRF: el destino
+        # responde 302 hacia una IP interna y nos lleva de la mano.
+        follow_redirects=False,
+        transport=_transporte,
+    ) as http:
+        for ip in direcciones:
+            try:
+                return http.post(
+                    _url_hacia(url, ip),
+                    content=contenido,
+                    headers={**cabeceras, "host": partes.netloc},
+                    extensions={"sni_hostname": partes.hostname},
+                )
+            except httpx.ConnectError as error:
+                # Un nombre puede resolver a varias IPs (IPv6 e IPv4, por
+                # ejemplo); si una no acepta la conexion se prueba la siguiente.
+                ultimo_error = error
+    raise ultimo_error or DestinoNoPermitido("No hay direcciones a las que conectar")
 
 
 def _fallo(
@@ -231,6 +352,75 @@ def _fallo(
     entrega.ultimo_codigo = codigo
     entrega.proximo_intento_en = ahora_utc() + _espera(intento)
     endpoint.fallos_consecutivos += 1
+    if endpoint.fallos_consecutivos >= FALLOS_PARA_SUSPENDER and endpoint.estado == "ACTIVO":
+        # Un endpoint que lleva tanto tiempo fallando solo acumula reintentos
+        # inutiles. Se suspende y el integrador lo reactiva cuando lo arregle.
+        endpoint.estado = "SUSPENDIDO"
+
+
+# ---------------------------------------------------------------------------
+# Gestion por parte del integrador
+# ---------------------------------------------------------------------------
+
+def listar_endpoints(sesion: Session, tenant_id: str) -> list[EndpointWebhook]:
+    return list(
+        sesion.scalars(
+            select(EndpointWebhook)
+            .where(EndpointWebhook.tenant_id == tenant_id)
+            .order_by(EndpointWebhook.creado_en)
+        )
+    )
+
+
+def obtener_endpoint(sesion: Session, tenant_id: str, endpoint_id: str) -> EndpointWebhook | None:
+    return sesion.scalars(
+        select(EndpointWebhook).where(
+            EndpointWebhook.tenant_id == tenant_id, EndpointWebhook.id == endpoint_id
+        )
+    ).first()
+
+
+def listar_entregas(
+    sesion: Session, tenant_id: str, endpoint_id: str, limite: int = 50
+) -> list[EntregaWebhook]:
+    return list(
+        sesion.scalars(
+            select(EntregaWebhook)
+            .where(
+                EntregaWebhook.tenant_id == tenant_id,
+                EntregaWebhook.endpoint_id == endpoint_id,
+            )
+            .order_by(EntregaWebhook.creada_en.desc())
+            .limit(limite)
+        )
+    )
+
+
+def obtener_entrega(sesion: Session, tenant_id: str, entrega_id: str) -> EntregaWebhook | None:
+    return sesion.scalars(
+        select(EntregaWebhook).where(
+            EntregaWebhook.tenant_id == tenant_id, EntregaWebhook.id == entrega_id
+        )
+    ).first()
+
+
+def reactivar(endpoint: EndpointWebhook) -> None:
+    endpoint.estado = "ACTIVO"
+    endpoint.fallos_consecutivos = 0
+
+
+def reintentar(entrega: EntregaWebhook, endpoint: EndpointWebhook) -> None:
+    """
+    Vuelve a poner una entrega en la cola, aunque ya se hubiera entregado:
+    sirve al integrador que perdio el evento de su lado. Si ya habia agotado
+    los reintentos, el reintento manual es uno solo.
+    """
+    if endpoint.estado != "ACTIVO":
+        raise EstadoNoPermitido("El endpoint esta suspendido: reactivalo antes de reintentar")
+    if entrega.estado == "EN_CURSO":
+        raise EstadoNoPermitido("La entrega se esta enviando en este momento")
+    entrega.estado = "PENDIENTE"
+    entrega.proximo_intento_en = ahora_utc()
 
 
 def firma_esperada(secreto: str, marca_tiempo: str, cuerpo: str) -> str:

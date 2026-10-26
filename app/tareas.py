@@ -2,7 +2,7 @@
 Tareas periodicas del servicio.
 
 Son el trabajo que no nace de una peticion: vencer contratos que nadie firmo a
-tiempo y reintentar webhooks que fallaron. Corren en un proceso aparte
+tiempo y reintentar avisos y webhooks que fallaron. Corren en un proceso aparte
 (python -m scripts.tareas), asi la API no depende de que llegue trafico para
 que estas cosas ocurran.
 """
@@ -12,10 +12,20 @@ import logging
 import threading
 
 from app.db import FabricaSesion
-from app.dominio import webhooks
+from app.dominio import avisos, webhooks
 from app.dominio.contratos import vencer_pendientes
 
 registro = logging.getLogger("tareas")
+
+
+def despachar_en_linea() -> None:
+    """
+    Lo que la API intenta mandar justo despues de responder: los avisos a los
+    firmantes y, si la configuracion lo permite, los webhooks. Lo que falle
+    aqui lo retoma el proceso de tareas.
+    """
+    avisos.procesar_pendientes()
+    webhooks.entregar_en_linea()
 
 
 def ejecutar_ciclo() -> dict[str, int]:
@@ -24,8 +34,13 @@ def ejecutar_ciclo() -> dict[str, int]:
         vencidos = vencer_pendientes(sesion)
         sesion.commit()
 
+    enviados = avisos.procesar_pendientes()
     entregados = webhooks.procesar_pendientes()
-    return {"contratos_vencidos": vencidos, "webhooks_entregados": entregados}
+    return {
+        "contratos_vencidos": vencidos,
+        "avisos_enviados": enviados,
+        "webhooks_entregados": entregados,
+    }
 
 
 def ejecutar_siempre(intervalo_s: float, detener: threading.Event | None = None) -> None:

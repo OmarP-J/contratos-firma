@@ -59,6 +59,51 @@ class CredencialApi(Base):
     ultimo_uso_en: Mapped[datetime | None] = mapped_column(FechaUtc, nullable=True)
 
 
+class UsuarioAdmin(Base):
+    """Una persona de la empresa que entra al portal administrativo."""
+
+    __tablename__ = "usuarios_admin"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    email: Mapped[str] = mapped_column(String(254), unique=True, index=True)
+    nombre: Mapped[str] = mapped_column(String(200))
+    # Como los secretos de credencial: solo el hash, con scrypt.
+    clave_hash: Mapped[str] = mapped_column(String(200))
+    # Cifrado: el servicio necesita recuperarlo para verificar los codigos.
+    totp_secreto_cifrado: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mfa_activo: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Ultimo paso de tiempo TOTP aceptado, para que un codigo no sirva dos veces.
+    totp_ultimo_paso: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    estado: Mapped[str] = mapped_column(String(20), default="ACTIVO")
+    intentos_fallidos: Mapped[int] = mapped_column(Integer, default=0)
+    bloqueado_hasta: Mapped[datetime | None] = mapped_column(FechaUtc, nullable=True)
+    creado_en: Mapped[datetime] = mapped_column(FechaUtc, default=ahora_utc)
+    ultimo_acceso_en: Mapped[datetime | None] = mapped_column(FechaUtc, nullable=True)
+
+
+class SesionAdmin(Base):
+    """
+    Una sesion del portal administrativo. La cookie lleva un token aleatorio;
+    aqui solo se guarda su hash, igual que con los enlaces de firma.
+    """
+
+    __tablename__ = "sesiones_admin"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    usuario_id: Mapped[str] = mapped_column(ForeignKey("usuarios_admin.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    mfa_verificada: Mapped[bool] = mapped_column(Boolean, default=False)
+    intentos_mfa: Mapped[int] = mapped_column(Integer, default=0)
+    ip: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    agente: Mapped[str | None] = mapped_column(String(400), nullable=True)
+    creada_en: Mapped[datetime] = mapped_column(FechaUtc, default=ahora_utc)
+    ultimo_uso_en: Mapped[datetime] = mapped_column(FechaUtc, default=ahora_utc)
+    expira_en: Mapped[datetime] = mapped_column(FechaUtc)
+    cerrada_en: Mapped[datetime | None] = mapped_column(FechaUtc, nullable=True)
+
+
 class Plantilla(Base):
     __tablename__ = "plantillas"
     __table_args__ = (UniqueConstraint("tenant_id", "codigo", name="uq_plantilla_codigo"),)
@@ -118,6 +163,9 @@ class Contrato(Base):
     hash_documento: Mapped[str] = mapped_column(String(64))
     clave_documento_final: Mapped[str | None] = mapped_column(String(200), nullable=True)
     hash_documento_final: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Representacion PDF del documento final. El de referencia sigue siendo el HTML.
+    clave_documento_final_pdf: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    hash_documento_final_pdf: Mapped[str | None] = mapped_column(String(64), nullable=True)
     politica: Mapped[dict] = mapped_column(JSON, default=dict)
 
     credencial_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
@@ -292,6 +340,31 @@ class EntregaWebhook(Base):
     ultimo_error: Mapped[str | None] = mapped_column(String(400), nullable=True)
     creada_en: Mapped[datetime] = mapped_column(FechaUtc, default=ahora_utc)
     entregada_en: Mapped[datetime | None] = mapped_column(FechaUtc, nullable=True)
+
+
+class AvisoSaliente(Base):
+    """
+    Un aviso pendiente de enviar al firmante (patron outbox). Se guarda en la
+    misma transaccion que la invitacion, asi que existe si y solo si ella existe.
+    """
+
+    __tablename__ = "avisos_salientes"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    contrato_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    canal: Mapped[str] = mapped_column(String(10))
+    destino: Mapped[str] = mapped_column(String(254))
+    destino_enmascarado: Mapped[str] = mapped_column(String(120))
+    # Asunto y texto cifrados: el texto lleva el enlace con el token de firma.
+    # Se vacia en cuanto el aviso sale o se da por perdido.
+    contenido_cifrado: Mapped[str] = mapped_column(Text)
+    estado: Mapped[str] = mapped_column(String(20), default="PENDIENTE", index=True)
+    intentos: Mapped[int] = mapped_column(Integer, default=0)
+    proximo_intento_en: Mapped[datetime] = mapped_column(FechaUtc, default=ahora_utc)
+    ultimo_error: Mapped[str | None] = mapped_column(String(400), nullable=True)
+    creado_en: Mapped[datetime] = mapped_column(FechaUtc, default=ahora_utc)
+    enviado_en: Mapped[datetime | None] = mapped_column(FechaUtc, nullable=True)
 
 
 class ClaveIdempotencia(Base):

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import ipaddress
+import logging
 import time
 from collections import defaultdict
 
@@ -15,10 +16,12 @@ from sqlalchemy.orm import Session
 from app.config import ajustes
 from app.db import ahora_utc, obtener_sesion
 from app.dominio.contratos import Contexto
+from app.dominio.credenciales import PERMISOS  # noqa: F401  (lista canonica)
 from app.models import CredencialApi
 from app.seguridad import verificar_secreto
 
-PERMISOS = {"contratos:crear", "contratos:leer", "contratos:anular", "contratos:descargar"}
+
+registro = logging.getLogger("limites")
 
 
 # ---------------------------------------------------------------------------
@@ -48,27 +51,90 @@ def ip_observada(request: Request) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Limite de peticiones (en memoria; sustituir por Redis con varias instancias)
+# Limite de peticiones
 # ---------------------------------------------------------------------------
 
-_contadores: dict[str, list[float]] = defaultdict(list)
+class LimitadorMemoria:
+    """Ventana deslizante en memoria. Solo es correcto con una instancia de la API."""
+
+    def __init__(self) -> None:
+        self._marcas: dict[str, list[float]] = defaultdict(list)
+
+    def permitir(self, clave: str, limite: int, ventana_s: int) -> bool:
+        ahora = time.monotonic()
+        marcas = [t for t in self._marcas[clave] if ahora - t < ventana_s]
+        if len(marcas) >= limite:
+            self._marcas[clave] = marcas
+            return False
+        marcas.append(ahora)
+        self._marcas[clave] = marcas
+        return True
+
+    def reiniciar(self) -> None:
+        self._marcas.clear()
+
+
+class LimitadorRedis:
+    """
+    Ventana fija compartida en Redis, para varias instancias de la API: el
+    limite vale para todo el sistema y no por proceso. En el borde entre dos
+    ventanas puede dejar pasar hasta el doble durante un instante; a cambio
+    son dos comandos por peticion y ningun script.
+
+    Si Redis no responde, la peticion pasa y queda registrado: un limitador
+    caido no deberia tumbar la API. Lo que protege secretos tiene ademas su
+    propio tope en la base (los intentos de OTP).
+    """
+
+    def __init__(self, cliente, prefijo: str = "limite") -> None:
+        from redis.exceptions import RedisError
+
+        self.cliente = cliente
+        self.prefijo = prefijo
+        self._errores = (RedisError, OSError)
+
+    def permitir(self, clave: str, limite: int, ventana_s: int) -> bool:
+        ventana = int(time.time() // ventana_s)
+        llave = f"{self.prefijo}:{clave}:{ventana}"
+        try:
+            tuberia = self.cliente.pipeline()
+            tuberia.incr(llave)
+            tuberia.expire(llave, ventana_s)
+            cuenta, _ = tuberia.execute()
+        except self._errores:
+            registro.warning("Redis no responde; se omite el limite de %s", clave)
+            return True
+        return cuenta <= limite
+
+    def reiniciar(self) -> None:
+        """En Redis las claves caducan solas; no hay nada que limpiar a mano."""
+
+
+def _crear_limitador() -> LimitadorMemoria | LimitadorRedis:
+    url = ajustes().url_redis
+    if not url:
+        return LimitadorMemoria()
+    import redis
+
+    # Timeouts cortos: esperar a un Redis lento seria peor que no limitar.
+    return LimitadorRedis(
+        redis.Redis.from_url(url, socket_timeout=0.5, socket_connect_timeout=0.5)
+    )
+
+
+_limitador = _crear_limitador()
 
 
 def limitar(clave: str, limite: int, ventana_s: int) -> None:
-    ahora = time.monotonic()
-    marcas = [t for t in _contadores[clave] if ahora - t < ventana_s]
-    if len(marcas) >= limite:
-        _contadores[clave] = marcas
+    if not _limitador.permitir(clave, limite, ventana_s):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail={"error": "limite_excedido", "mensaje": "Demasiadas solicitudes"},
         )
-    marcas.append(ahora)
-    _contadores[clave] = marcas
 
 
 def reiniciar_limites() -> None:
-    _contadores.clear()
+    _limitador.reiniciar()
 
 
 # ---------------------------------------------------------------------------
