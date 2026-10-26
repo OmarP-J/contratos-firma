@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from app import notificaciones
 from app.db import FabricaSesion
-from app.dominio import contratos as servicio
+from app.dominio import avisos, contratos as servicio
 from app.models import CredencialApi
 from app.notificaciones import ErrorDeEnvio
 from tests.ayudas import VARIABLES, crear_contrato, crear_plantilla, firmar_como, token_de
@@ -83,6 +83,7 @@ def test_si_la_transaccion_se_deshace_no_sale_ningun_aviso(cliente, empresa, buz
         sesion.rollback()
         # Un commit posterior en la misma sesion no debe rescatar el aviso.
         sesion.commit()
+    avisos.procesar_pendientes()
     assert _invitaciones(buzon) == []
 
 

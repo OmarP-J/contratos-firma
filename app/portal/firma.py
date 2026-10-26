@@ -35,6 +35,7 @@ from app.dependencias import ip_observada, limitar
 from app.dominio import auditoria, contratos as servicio, webhooks
 from app.dominio.contratos import Contexto, ErrorDeNegocio
 from app.dominio.estados import TransicionInvalida
+from app.tareas import despachar_en_linea
 from app.models import Contrato, DesafioOtp, Invitacion, ParteContrato, SesionFirma
 from app.notificaciones import ErrorDeEnvio, Mensaje
 from app.seguridad import (
@@ -193,7 +194,7 @@ def abrir(
             datos={"status": acceso.contrato.estado,
                    "external_reference": acceso.contrato.referencia_externa},
         )
-        tareas.add_task(webhooks.entregar_en_linea)
+        tareas.add_task(despachar_en_linea)
     sesion.commit()
 
     if acceso.sesion_firma.autenticada or not (acceso.contrato.politica or {}).get("requiere_otp", True):
@@ -479,7 +480,7 @@ def firmar(
 
     acceso.invitacion.estado = "USADA"
     sesion.commit()
-    tareas.add_task(webhooks.entregar_en_linea)
+    tareas.add_task(despachar_en_linea)
     return RedirectResponse(f"/firma/{token}/listo", status_code=303)
 
 
@@ -516,7 +517,7 @@ def rechazar(
         return plantillas.TemplateResponse(request, "documento.html", contexto, status_code=409)
 
     sesion.commit()
-    tareas.add_task(webhooks.entregar_en_linea)
+    tareas.add_task(despachar_en_linea)
     return RedirectResponse(f"/firma/{token}/listo", status_code=303)
 
 

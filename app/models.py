@@ -294,6 +294,31 @@ class EntregaWebhook(Base):
     entregada_en: Mapped[datetime | None] = mapped_column(FechaUtc, nullable=True)
 
 
+class AvisoSaliente(Base):
+    """
+    Un aviso pendiente de enviar al firmante (patron outbox). Se guarda en la
+    misma transaccion que la invitacion, asi que existe si y solo si ella existe.
+    """
+
+    __tablename__ = "avisos_salientes"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    contrato_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    canal: Mapped[str] = mapped_column(String(10))
+    destino: Mapped[str] = mapped_column(String(254))
+    destino_enmascarado: Mapped[str] = mapped_column(String(120))
+    # Asunto y texto cifrados: el texto lleva el enlace con el token de firma.
+    # Se vacia en cuanto el aviso sale o se da por perdido.
+    contenido_cifrado: Mapped[str] = mapped_column(Text)
+    estado: Mapped[str] = mapped_column(String(20), default="PENDIENTE", index=True)
+    intentos: Mapped[int] = mapped_column(Integer, default=0)
+    proximo_intento_en: Mapped[datetime] = mapped_column(FechaUtc, default=ahora_utc)
+    ultimo_error: Mapped[str | None] = mapped_column(String(400), nullable=True)
+    creado_en: Mapped[datetime] = mapped_column(FechaUtc, default=ahora_utc)
+    enviado_en: Mapped[datetime | None] = mapped_column(FechaUtc, nullable=True)
+
+
 class ClaveIdempotencia(Base):
     """
     Guarda la respuesta de una creacion para devolver lo mismo si el integrador

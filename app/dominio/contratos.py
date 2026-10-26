@@ -14,11 +14,10 @@ from typing import Any
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
-from app import notificaciones
 from app.almacenamiento import almacen, nueva_clave
 from app.config import ajustes
 from app.db import ahora_utc
-from app.dominio import auditoria, documentos, webhooks
+from app.dominio import auditoria, avisos, documentos, webhooks
 from app.dominio.estados import EVENTO_WEBHOOK, Estado, exigir_transicion
 from app.dominio.firma import SolicitudFirma, proveedor_actual
 from app.dominio.politica import normalizar as normalizar_politica
@@ -339,7 +338,8 @@ def _avisar_invitacion(
 
     El enlace del representante de la empresa se crea en el momento en que
     firma el cliente; sin este aviso solo podria recuperarse reenviando por la
-    API. El mensaje sale cuando la transaccion se confirma, no antes.
+    API. El aviso se guarda en esta misma transaccion y sale despues (ver
+    dominio/avisos.py).
     """
     if parte.email:
         canal, destino = "EMAIL", parte.email
@@ -361,10 +361,12 @@ def _avisar_invitacion(
             f"El enlace es personal y vence el {vence}. Si no esperabas este mensaje, "
             "ignoralo."
         )
-    notificaciones.enviar_al_confirmar(
+    avisos.encolar(
         sesion,
-        Mensaje(canal=canal, destino=destino,
-                asunto=f"Documento para firmar: {contrato.titulo}", texto=texto),
+        tenant_id=contrato.tenant_id,
+        contrato_id=contrato.id,
+        mensaje=Mensaje(canal=canal, destino=destino,
+                        asunto=f"Documento para firmar: {contrato.titulo}", texto=texto),
     )
     return canal
 

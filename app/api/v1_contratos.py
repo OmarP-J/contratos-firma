@@ -38,6 +38,7 @@ from app.dominio.contratos import ErrorDeNegocio, NoEncontrado
 from app.dominio.estados import Estado, TransicionInvalida
 from app.dominio.plantillas import PlantillaInvalida, sanitizar_cuerpo
 from app.dominio.variables import DatosInvalidos, validar_schema
+from app.tareas import despachar_en_linea
 from app.almacenamiento import almacen
 from app.models import ClaveIdempotencia, Plantilla, VersionPlantilla
 from app.schemas import AnularContrato, CrearContrato, CrearPlantilla, RegistrarWebhook
@@ -127,7 +128,7 @@ def crear_contrato(
             )
         )
     sesion.commit()
-    tareas.add_task(webhooks.entregar_en_linea)
+    tareas.add_task(despachar_en_linea)
     return cuerpo
 
 
@@ -245,7 +246,7 @@ def anular_contrato(
             detail={"error": "estado_invalido", "mensaje": str(error)},
         ) from error
     sesion.commit()
-    tareas.add_task(webhooks.entregar_en_linea)
+    tareas.add_task(despachar_en_linea)
     return servicio.como_json(sesion, contrato)
 
 
@@ -272,7 +273,7 @@ def reenviar_invitacion(
             detail={"error": "estado_invalido", "mensaje": str(error)},
         ) from error
     sesion.commit()
-    tareas.add_task(webhooks.entregar_en_linea)
+    tareas.add_task(despachar_en_linea)
     cuerpo = servicio.como_json(sesion, contrato)
     cuerpo["signing_url"] = url
     return cuerpo
@@ -452,7 +453,7 @@ def reintentar_entrega(
             detail={"error": "estado_invalido", "mensaje": str(error)},
         ) from error
     sesion.commit()
-    tareas.add_task(webhooks.entregar_en_linea)
+    tareas.add_task(despachar_en_linea)
     return _entrega_json(entrega)
 
 

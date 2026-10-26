@@ -15,8 +15,6 @@ from email.message import EmailMessage
 from typing import Protocol, runtime_checkable
 
 import httpx
-from sqlalchemy import event
-from sqlalchemy.orm import Session
 
 from app.config import ajustes
 from app.seguridad import enmascarar
@@ -245,41 +243,6 @@ _actual: Notificador = construir()
 
 def enviar(mensaje: Mensaje) -> None:
     _actual.enviar(mensaje)
-
-
-# ---------------------------------------------------------------------------
-# Envio al confirmar la transaccion
-# ---------------------------------------------------------------------------
-
-_PENDIENTES = "notificaciones_pendientes"
-
-
-def enviar_al_confirmar(sesion: Session, mensaje: Mensaje) -> None:
-    """
-    Deja el mensaje listo para salir cuando la transaccion se confirme.
-
-    Si la transaccion se deshace, el mensaje no sale: no se le manda a nadie
-    un enlace a una invitacion que nunca llego a existir.
-    """
-    sesion.info.setdefault(_PENDIENTES, []).append(mensaje)
-
-
-@event.listens_for(Session, "after_commit")
-def _enviar_pendientes(sesion: Session) -> None:
-    for mensaje in sesion.info.pop(_PENDIENTES, []):
-        try:
-            enviar(mensaje)
-        except ErrorDeEnvio:
-            # La invitacion sigue siendo valida y se puede reenviar por la API.
-            registro.warning("no se pudo avisar a %s", enmascarar(mensaje.destino))
-
-
-@event.listens_for(Session, "after_transaction_end")
-def _descartar_pendientes(sesion: Session, transaccion) -> None:
-    # Si la transaccion se confirmo, after_commit ya los envio. Lo que quede
-    # aqui es de una transaccion deshecha o cerrada sin confirmar.
-    if transaccion.parent is None:
-        sesion.info.pop(_PENDIENTES, None)
 
 
 def instalar(nuevo: Notificador) -> Notificador:
