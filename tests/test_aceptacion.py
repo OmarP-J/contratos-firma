@@ -130,6 +130,28 @@ def test_sin_identificarse_no_se_ve_el_documento(cliente, empresa, otp_fijo):
     assert cliente.get(f"/firma/{token}/contrato.html").status_code == 403
 
 
+def test_el_documento_se_puede_ver_dentro_de_la_pagina_de_firma(cliente, empresa, otp_fijo):
+    """
+    El contrato se muestra en un iframe de nuestro propio dominio. Si su
+    respuesta saliera con X-Frame-Options: DENY, el navegador dejaria el marco
+    en blanco y el firmante no veria lo que firma.
+    """
+    from tests.ayudas import identificarse
+
+    crear_plantilla(cliente, empresa)
+    contrato = crear_contrato(cliente, empresa).json()
+    token = token_de(contrato["signing_url"])
+    identificarse(cliente, token, otp_fijo)
+
+    marco = cliente.get(f"/firma/{token}/contrato.html")
+    assert marco.headers["x-frame-options"] == "SAMEORIGIN"
+    assert "frame-ancestors 'self'" in marco.headers["content-security-policy"]
+    assert marco.headers["content-security-policy"].startswith("sandbox")
+    # La pagina que lo contiene, en cambio, no se deja enmarcar por nadie.
+    pagina = cliente.get(f"/firma/{token}/documento")
+    assert pagina.headers["x-frame-options"] == "DENY"
+
+
 def test_codigo_equivocado_no_autentica(cliente, empresa, otp_fijo):
     crear_plantilla(cliente, empresa)
     contrato = crear_contrato(cliente, empresa).json()

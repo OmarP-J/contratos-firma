@@ -401,7 +401,13 @@ def contenido_contrato(token: str, request: Request, sesion: Session = Depends(o
         content=contenido,
         media_type="text/html; charset=utf-8",
         headers={
-            "Content-Security-Policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'",
+            # Solo se puede enmarcar desde nuestra propia pagina de firma. Sin
+            # esto el middleware pone X-Frame-Options: DENY y el navegador deja
+            # el marco en blanco: el firmante no veria lo que firma.
+            "Content-Security-Policy": (
+                "sandbox; default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'self'"
+            ),
+            "X-Frame-Options": "SAMEORIGIN",
             "X-Content-Type-Options": "nosniff",
         },
     )
