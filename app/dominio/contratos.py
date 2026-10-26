@@ -7,12 +7,14 @@ auditar -> completar -> custodiar -> notificar.
 """
 from __future__ import annotations
 
+import base64
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.almacenamiento import almacen, nueva_clave
@@ -816,6 +818,7 @@ def listar(
     tenant_id: str,
     *,
     estado: str | None = None,
+    estados: tuple[str, ...] | None = None,
     referencia_externa: str | None = None,
     creado_desde: datetime | None = None,
     creado_hasta: datetime | None = None,
@@ -832,6 +835,8 @@ def listar(
     consulta = select(Contrato).where(Contrato.tenant_id == tenant_id)
     if estado:
         consulta = consulta.where(Contrato.estado == estado)
+    if estados:
+        consulta = consulta.where(Contrato.estado.in_(estados))
     if referencia_externa:
         consulta = consulta.where(Contrato.referencia_externa == referencia_externa)
     if creado_desde:
@@ -851,6 +856,35 @@ def listar(
             consulta.order_by(Contrato.creado_en.desc(), Contrato.id.desc()).limit(limite)
         )
     )
+
+
+def cursor_de(contrato: Contrato) -> str:
+    """El cursor que apunta justo despues de este contrato en el listado."""
+    crudo = json.dumps({"c": contrato.creado_en.isoformat(), "i": contrato.id})
+    return base64.urlsafe_b64encode(crudo.encode()).decode().rstrip("=")
+
+
+def leer_cursor(cursor: str) -> tuple[datetime, str]:
+    """Lanza ValueError si el cursor no es uno que hayamos emitido."""
+    try:
+        relleno = "=" * (-len(cursor) % 4)
+        datos = json.loads(base64.urlsafe_b64decode(cursor + relleno))
+        fecha = datetime.fromisoformat(datos["c"])
+        identificador = str(datos["i"])
+    except (ValueError, KeyError, TypeError) as error:
+        raise ValueError("El cursor no es valido") from error
+    if fecha.tzinfo is None:
+        raise ValueError("El cursor no es valido")
+    return fecha, identificador
+
+
+def contar_por_estado(sesion: Session, tenant_id: str) -> dict[str, int]:
+    filas = sesion.execute(
+        select(Contrato.estado, func.count())
+        .where(Contrato.tenant_id == tenant_id)
+        .group_by(Contrato.estado)
+    )
+    return {estado: cuantos for estado, cuantos in filas}
 
 
 def resumen_json(contrato: Contrato) -> dict[str, Any]:

@@ -59,6 +59,51 @@ class CredencialApi(Base):
     ultimo_uso_en: Mapped[datetime | None] = mapped_column(FechaUtc, nullable=True)
 
 
+class UsuarioAdmin(Base):
+    """Una persona de la empresa que entra al portal administrativo."""
+
+    __tablename__ = "usuarios_admin"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    email: Mapped[str] = mapped_column(String(254), unique=True, index=True)
+    nombre: Mapped[str] = mapped_column(String(200))
+    # Como los secretos de credencial: solo el hash, con scrypt.
+    clave_hash: Mapped[str] = mapped_column(String(200))
+    # Cifrado: el servicio necesita recuperarlo para verificar los codigos.
+    totp_secreto_cifrado: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mfa_activo: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Ultimo paso de tiempo TOTP aceptado, para que un codigo no sirva dos veces.
+    totp_ultimo_paso: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    estado: Mapped[str] = mapped_column(String(20), default="ACTIVO")
+    intentos_fallidos: Mapped[int] = mapped_column(Integer, default=0)
+    bloqueado_hasta: Mapped[datetime | None] = mapped_column(FechaUtc, nullable=True)
+    creado_en: Mapped[datetime] = mapped_column(FechaUtc, default=ahora_utc)
+    ultimo_acceso_en: Mapped[datetime | None] = mapped_column(FechaUtc, nullable=True)
+
+
+class SesionAdmin(Base):
+    """
+    Una sesion del portal administrativo. La cookie lleva un token aleatorio;
+    aqui solo se guarda su hash, igual que con los enlaces de firma.
+    """
+
+    __tablename__ = "sesiones_admin"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    usuario_id: Mapped[str] = mapped_column(ForeignKey("usuarios_admin.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    mfa_verificada: Mapped[bool] = mapped_column(Boolean, default=False)
+    intentos_mfa: Mapped[int] = mapped_column(Integer, default=0)
+    ip: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    agente: Mapped[str | None] = mapped_column(String(400), nullable=True)
+    creada_en: Mapped[datetime] = mapped_column(FechaUtc, default=ahora_utc)
+    ultimo_uso_en: Mapped[datetime] = mapped_column(FechaUtc, default=ahora_utc)
+    expira_en: Mapped[datetime] = mapped_column(FechaUtc)
+    cerrada_en: Mapped[datetime | None] = mapped_column(FechaUtc, nullable=True)
+
+
 class Plantilla(Base):
     __tablename__ = "plantillas"
     __table_args__ = (UniqueConstraint("tenant_id", "codigo", name="uq_plantilla_codigo"),)

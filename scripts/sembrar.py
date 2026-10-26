@@ -11,9 +11,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.db import FabricaSesion, crear_tablas  # noqa: E402
-from app.dominio import credenciales  # noqa: E402
+from app.dominio import administradores, credenciales  # noqa: E402
 from app.dominio.contratos import publicar_plantilla  # noqa: E402
 from app.models import Tenant  # noqa: E402
+from app.seguridad import token_aleatorio  # noqa: E402
 
 CUERPO = """
 <p>Entre <strong>ACME Servicios SRL</strong>, en lo adelante EL PRESTADOR, y
@@ -65,6 +66,11 @@ def sembrar() -> dict:
             schema_variables=SCHEMA,
             politica={"requiere_otp": True, "requiere_firma_empresa": True},
         )
+        clave_admin = token_aleatorio(12)
+        administrador = administradores.crear_usuario(
+            sesion, tenant_id=tenant.id, email="admin@acme.test",
+            nombre="Administracion ACME", clave=clave_admin,
+        )
         sesion.commit()
 
         return {
@@ -72,6 +78,8 @@ def sembrar() -> dict:
             "client_id": credencial.client_id,
             "client_secret": secreto,
             "plantilla": plantilla.codigo,
+            "admin_email": administrador.email,
+            "admin_clave": clave_admin,
         }
 
 
@@ -80,4 +88,5 @@ if __name__ == "__main__":
     print("\nEmpresa de ejemplo creada\n")
     for clave, valor in datos.items():
         print(f"  {clave:15} {valor}")
-    print("\nGuarda el client_secret: no se vuelve a mostrar.\n")
+    print("\nGuarda el client_secret y la clave del admin: no se vuelven a mostrar.")
+    print("El portal administrativo esta en /admin.\n")

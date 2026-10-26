@@ -7,8 +7,6 @@ del lado de aca.
 """
 from __future__ import annotations
 
-import base64
-import json
 from datetime import datetime
 
 from fastapi import (
@@ -141,20 +139,10 @@ def _url_firma_actual(contrato) -> str | None:
     return getattr(contrato, "url_firma_recien_creada", None)
 
 
-def _codificar_cursor(contrato) -> str:
-    crudo = json.dumps({"c": contrato.creado_en.isoformat(), "i": contrato.id})
-    return base64.urlsafe_b64encode(crudo.encode()).decode().rstrip("=")
-
-
 def _decodificar_cursor(cursor: str) -> tuple[datetime, str]:
     try:
-        relleno = "=" * (-len(cursor) % 4)
-        datos = json.loads(base64.urlsafe_b64decode(cursor + relleno))
-        fecha = datetime.fromisoformat(datos["c"])
-        if fecha.tzinfo is None:
-            raise ValueError("cursor sin zona horaria")
-        return fecha, str(datos["i"])
-    except (ValueError, KeyError, TypeError) as error:
+        return servicio.leer_cursor(cursor)
+    except ValueError as error:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "cursor_invalido", "mensaje": "El cursor no es valido"},
@@ -213,7 +201,7 @@ def listar_contratos(
     pagina = filas[:limite]
     return {
         "data": [servicio.resumen_json(c) for c in pagina],
-        "next_cursor": _codificar_cursor(pagina[-1]) if len(filas) > limite else None,
+        "next_cursor": servicio.cursor_de(pagina[-1]) if len(filas) > limite else None,
     }
 
 

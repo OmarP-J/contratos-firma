@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block titulo %}Credencial creada{% endblock %}
+{% block contenido %}
+<p><a href="/admin/credenciales">&larr; Credenciales</a></p>
+<div class="tarjeta">
+  <h1>Credencial creada</h1>
+  <div class="aviso">Copia el secreto ahora. No se vuelve a mostrar: en la base solo queda su hash.</div>
+  <dl class="datos">
+    <dt>Nombre</dt><dd>{{ credencial.nombre }}</dd>
+    <dt>client_id</dt><dd class="mono" id="client-id">{{ credencial.client_id }}</dd>
+    <dt>client_secret</dt><dd class="mono" id="client-secret">{{ secreto }}</dd>
+    <dt>Permisos</dt><dd>{{ credencial.permisos | join(', ') }}</dd>
+  </dl>
+</div>
+{% endblock %}

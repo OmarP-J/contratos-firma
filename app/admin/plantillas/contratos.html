@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block titulo %}Contratos{% endblock %}
+{% block contenido %}
+<h1>Contratos</h1>
+<p class="sutil">{{ pendientes }} esperando firma.</p>
+{% if aviso %}<div class="ok">{{ aviso }}</div>{% endif %}
+
+<div class="pestanas">
+  <a href="/admin/contratos?estado=pendientes" class="{{ 'activo' if estado == 'pendientes' }}">Pendientes ({{ pendientes }})</a>
+  {% for e in estados if e not in ('PENDIENTE_CLIENTE', 'PENDIENTE_EMPRESA') %}
+    <a href="/admin/contratos?estado={{ e }}" class="{{ 'activo' if estado == e }}">{{ e | capitalize }} ({{ conteo.get(e, 0) }})</a>
+  {% endfor %}
+  <a href="/admin/contratos?estado=todos" class="{{ 'activo' if estado == 'todos' }}">Todos</a>
+</div>
+
+<div class="tarjeta">
+  <form method="get" action="/admin/contratos" class="fila" style="margin-bottom:1rem">
+    <input type="hidden" name="estado" value="{{ estado }}">
+    <div>
+      <label for="referencia" style="margin-top:0">Referencia del sistema origen</label>
+      <input id="referencia" name="referencia" type="text" value="{{ referencia }}" placeholder="SOL-839291">
+    </div>
+    <div style="flex:0"><button type="submit" class="secundario">Buscar</button></div>
+  </form>
+
+  {% if contratos %}
+  <table>
+    <thead><tr><th>Contrato</th><th>Referencia</th><th>Estado</th><th>Creado</th><th>Vence</th></tr></thead>
+    <tbody>
+    {% for c in contratos %}
+      <tr>
+        <td><a href="/admin/contratos/{{ c.id }}">{{ c.titulo }}</a><br>
+            <span class="mono sutil">{{ c.id[:8] }}</span></td>
+        <td>{{ c.referencia_externa or '-' }}</td>
+        <td><span class="estado {{ c.estado }}">{{ c.estado }}</span></td>
+        <td>{{ c.creado_en | fecha }}</td>
+        <td>{{ c.expira_en | fecha if c.estado in ('CREADO', 'PENDIENTE_CLIENTE') else '-' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if siguiente %}
+    <p><a class="boton secundario" href="/admin/contratos?estado={{ estado }}&referencia={{ referencia | urlencode }}&cursor={{ siguiente }}">Mas antiguos</a></p>
+  {% endif %}
+  {% else %}
+    <p class="sutil">No hay contratos con ese filtro.</p>
+  {% endif %}
+</div>
+{% endblock %}
