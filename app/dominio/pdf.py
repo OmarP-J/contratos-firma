@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from xml.sax.saxutils import escape
 
+from reportlab.graphics.shapes import Drawing, Line, PolyLine
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 from reportlab.lib.pagesizes import A4
@@ -29,6 +30,7 @@ from reportlab.lib.units import cm
 from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.platypus import (
     HRFlowable,
+    KeepTogether,
     ListFlowable,
     ListItem,
     Paragraph,
@@ -50,6 +52,7 @@ class Nodo:
     etiqueta: str
     clases: set[str] = field(default_factory=set)
     hijos: list = field(default_factory=list)
+    attrs: dict = field(default_factory=dict)
 
 
 class _Arbol(HTMLParser):
@@ -67,8 +70,9 @@ class _Arbol(HTMLParser):
             return
         if self.ignorando:
             return
-        clases = set((dict(atributos).get("class") or "").split())
-        nodo = Nodo(etiqueta, clases)
+        attrs = {k: (v or "") for k, v in atributos}
+        clases = set(attrs.get("class", "").split())
+        nodo = Nodo(etiqueta, clases, attrs=attrs)
         self.pila[-1].hijos.append(nodo)
         if etiqueta not in VACIAS:
             self.pila.append(nodo)
@@ -195,6 +199,35 @@ def _tabla(nodo: Nodo, estilos: dict) -> list:
     return [tabla, Spacer(1, 8)]
 
 
+def _dibujo(nodo: Nodo) -> list:
+    """
+    La firma manuscrita (un <svg> con <polyline>) como dibujo vectorial del PDF.
+    Solo se entienden polilineas: es lo unico que fabrica firma_manuscrita.svg().
+    """
+    try:
+        ancho_px = float(nodo.attrs.get("width", 240))
+        alto_px = float(nodo.attrs.get("height", 80))
+        _, _, vw, vh = [float(n) for n in (nodo.attrs.get("viewbox") or "0 0 600 200").split()]
+        ancho, alto = ancho_px * 0.75, alto_px * 0.75  # px a puntos
+        dibujo = Drawing(ancho, alto)
+        sx, sy = ancho / vw, alto / vh
+        for hijo in nodo.hijos:
+            if not isinstance(hijo, Nodo) or hijo.etiqueta != "polyline":
+                continue
+            plano: list[float] = []
+            for par in hijo.attrs.get("points", "").split():
+                x, y = (float(n) for n in par.split(","))
+                plano += [x * sx, (vh - y) * sy]  # el eje y del PDF crece hacia arriba
+            if len(plano) >= 4:
+                dibujo.add(PolyLine(plano, strokeColor=colors.HexColor("#14151a"), strokeWidth=2.4 * sx,
+                                    strokeLineCap=1, strokeLineJoin=1))
+        dibujo.add(Line(0, 0, ancho, 0, strokeColor=colors.HexColor("#14151a"), strokeWidth=0.6))
+        dibujo.hAlign = "LEFT"
+    except (ValueError, ZeroDivisionError):
+        return []
+    return [dibujo, Spacer(1, 8)]
+
+
 def _bloques(nodos: list, estilos: dict) -> list:
     salida, suelto = [], []
 
@@ -227,6 +260,11 @@ def _bloques(nodos: list, estilos: dict) -> list:
             salida.extend(_tabla(nodo, estilos))
         elif etiqueta == "hr":
             salida.append(HRFlowable(width="100%", thickness=0.6, color=colors.HexColor("#c9c9d2")))
+        elif etiqueta == "svg":
+            salida.extend(_dibujo(nodo))
+        elif "firma-manuscrita" in nodo.clases:
+            # La etiqueta y el dibujo van siempre en la misma pagina.
+            salida.append(KeepTogether(_bloques(nodo.hijos, estilos)))
         else:
             if "constancia" in nodo.clases:
                 salida += [Spacer(1, 14), HRFlowable(width="100%", thickness=1.5), Spacer(1, 6)]

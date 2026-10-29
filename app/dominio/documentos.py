@@ -15,6 +15,7 @@ from datetime import datetime
 from html import escape
 from typing import Any
 
+from app.dominio import firma_manuscrita
 from app.dominio.plantillas import renderizar
 from app.seguridad import json_canonico, sha256
 
@@ -31,6 +32,9 @@ th { background: #eeeef2; }
 .pie { margin-top: 2.5rem; border-top: 1px solid #c9c9d2; padding-top: .8rem;
        font-size: .8em; color: #5a5c66; font-family: ui-monospace, monospace; }
 .constancia { margin-top: 2.5rem; border-top: 3px double #14151a; padding-top: 1.2rem; }
+.firma-manuscrita { margin: .5rem 0 1.4rem; }
+.firma-manuscrita p { margin: 0 0 .3rem; font-size: .85em; color: #5a5c66; }
+.firma-manuscrita svg { display: block; background: #fff; border-bottom: 1px solid #14151a; max-width: 100%; height: auto; }
 """
 
 
@@ -105,6 +109,19 @@ def _fila(etiqueta: str, valor: Any) -> str:
     return f"<tr><td>{escape(etiqueta)}</td><td>{escape(str(valor if valor not in (None, '') else 'No aplica'))}</td></tr>"
 
 
+def _bloque_firma_manuscrita(datos: dict) -> str:
+    """La firma que dibujo el firmante, si la hay. Vacio en evidencias anteriores a esta funcion."""
+    firma = datos.get("firma_manuscrita")
+    if not firma:
+        return ""
+    return (
+        '<div class="firma-manuscrita">'
+        f'<p class="etiqueta-firma">Firma manuscrita de {escape(datos.get("nombre", ""))}, '
+        "dibujada en pantalla al firmar:</p>"
+        f"{firma_manuscrita.svg(firma)}</div>"
+    )
+
+
 def construir_constancia(
     *,
     contrato: dict,
@@ -132,6 +149,8 @@ def construir_constancia(
             + _fila("Correo", d.get("email"))
             + _fila("Metodo de autenticacion", d.get("metodo_autenticacion"))
             + _fila("Aceptacion de uso de firma electronica", d.get("consentimiento_en"))
+            + (_fila("Huella de la firma manuscrita", d.get("firma_manuscrita_hash"))
+               if d.get("firma_manuscrita_hash") else "")
             + _fila("Fecha y hora de firma (UTC)", d.get("firmado_en"))
             + _fila("IP observada por el servidor", d.get("ip"))
             + _fila("Dispositivo declarado", (d.get("agente") or "")[:120])
@@ -140,6 +159,7 @@ def construir_constancia(
             + _fila("Algoritmo de firma", d.get("algoritmo"))
             + _fila("Valor de firma", (d.get("firma") or "")[:64])
             + "</tbody></table>"
+            + _bloque_firma_manuscrita(d)
         )
 
     filas_eventos = "".join(

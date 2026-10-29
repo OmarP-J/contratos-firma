@@ -101,8 +101,8 @@ un permiso concreto de la credencial.
 
 ### Portal de firma
 
-`/firma/{token}` → identificación con OTP → lectura del documento →
-consentimiento expreso → firma (o rechazo, con un motivo opcional). Todo en el
+`/firma/{token}` → identificación con OTP → lectura del documento → firma
+dibujada con el mouse o el dedo (o rechazo, con un motivo opcional). Todo en el
 dominio del servicio, para controlar cookies, cabeceras y aislamiento sin que el
 integrador implemente nada.
 
@@ -201,6 +201,16 @@ de tareas reintenta con espera creciente. Cada entrega se reclama con un
 mitad, otro la retoma. El receptor debe ignorar un `X-Event-Id` repetido. Tras
 15 fallos seguidos el endpoint se suspende.
 
+**La firma se dibuja, y viaja como trazos.** El firmante dibuja su firma en un
+recuadro (mouse, dedo o lápiz) justo debajo de la declaración de que leyó el
+contrato y acepta la firma electrónica; esa firma es el acto expreso de consentir,
+así que ya no hay casilla. El navegador manda los **trazos como números**, no una
+imagen: el servidor comprueba que sea una firma de verdad (que no sea un toque
+suelto ni una rayita), la dibuja siempre igual, y la incrusta en el documento
+final y en el PDF como un SVG fabricado solo con esas coordenadas, sin nada del
+navegador. Los trazos entran en la evidencia *antes* de sellarla, así que la firma
+criptográfica cubre también el dibujo, y su huella queda en la constancia.
+
 **Avisos con outbox.** El aviso con el enlace de firma se guarda en la misma
 transacción que la invitación: existe si y solo si ella existe. Sale después de
 responder y, si el proveedor falla, se reintenta hasta cinco veces; si se pierde,
@@ -236,6 +246,9 @@ TOTP, cifrado.
 
 Esto es la base funcional, no un sistema listo para producción.
 
+- **Firma dibujada sin alternativa de teclado.** Quien no pueda dibujar (con
+  mouse, dedo o lápiz) hoy no puede firmar desde el portal. Haría falta otra vía,
+  por ejemplo escribir el nombre o firmar con ayuda.
 - **Roles en el portal.** Todo administrador puede hacer todo dentro de su
   empresa. Separar quién publica plantillas de quién gestiona credenciales es el
   siguiente paso.

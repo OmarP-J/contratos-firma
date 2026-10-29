@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from app.almacenamiento import almacen, nueva_clave
 from app.config import ajustes
 from app.db import ahora_utc
-from app.dominio import auditoria, avisos, documentos, pdf, webhooks
+from app.dominio import auditoria, avisos, documentos, firma_manuscrita, pdf, webhooks
 from app.dominio.estados import EVENTO_WEBHOOK, Estado, exigir_transicion
 from app.dominio.firma import SolicitudFirma, proveedor_actual
 from app.dominio.politica import normalizar as normalizar_politica
@@ -447,10 +447,15 @@ def registrar_firma(
     parte: ParteContrato,
     sesion_firma: SesionFirma,
     consentimiento_en,
+    trazos_firma: dict,
 ) -> Firma:
     """
     Registra la firma de una parte: arma la evidencia, la sella con el proveedor
     de firma y hace avanzar el contrato.
+
+    trazos_firma es la firma que dibujo el firmante, ya validada
+    (firma_manuscrita.validar). Entra en la evidencia ANTES de sellarla: la firma
+    criptografica cubre tambien ese dibujo.
     """
     if parte.estado != "PENDIENTE":
         raise ErrorDeNegocio("Esta parte ya firmo o rechazo el contrato")
@@ -470,6 +475,8 @@ def registrar_firma(
         "precision_m": sesion_firma.precision_m,
         "ubicacion_en": documentos.iso(sesion_firma.ubicacion_en),
         "consentimiento_en": documentos.iso(consentimiento_en),
+        "firma_manuscrita": trazos_firma,
+        "firma_manuscrita_hash": firma_manuscrita.hash_de(trazos_firma),
         "firmado_en": documentos.iso(firmado_en),
         "hash_documento_al_firmar": contrato.hash_documento,
         "plantilla_version": contrato.numero_version,

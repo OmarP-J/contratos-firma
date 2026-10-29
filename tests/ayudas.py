@@ -1,6 +1,7 @@
 """Utilidades compartidas por las pruebas."""
 from __future__ import annotations
 
+import json
 import re
 
 CUERPO_PLANTILLA = (
@@ -80,10 +81,16 @@ def identificarse(cliente, token: str, codigo: str = "123456") -> str:
     return verificacion.text
 
 
+def firma_dibujada(puntos: int = 40) -> str:
+    """Lo que manda el navegador al dibujar: trazos en un lienzo de 600 x 200. Un zigzag amplio."""
+    trazo = [[60 + i * 12.0, 100 + (35 if i % 2 else -35)] for i in range(puntos)]
+    return json.dumps({"ancho": 600, "alto": 200, "trazos": [trazo]})
+
+
 def firmar_como(cliente, token: str, codigo: str = "123456", **datos_extra) -> None:
-    """Recorre el portal completo: abrir, pedir codigo, verificar, aceptar y firmar."""
+    """Recorre el portal completo: abrir, pedir codigo, verificar, dibujar la firma y firmar."""
     pagina = identificarse(cliente, token, codigo)
-    datos = {"csrf": csrf_de(pagina), "acepto": "si"}
+    datos = {"csrf": csrf_de(pagina), "firma": firma_dibujada()}
     datos.update(datos_extra)
     firma = cliente.post(f"/firma/{token}/firmar", data=datos, follow_redirects=True)
     assert firma.status_code == 200, firma.text

@@ -165,7 +165,8 @@ def test_codigo_equivocado_no_autentica(cliente, empresa, otp_fijo):
     assert cliente.get(f"/firma/{token}/documento").status_code == 403
 
 
-def test_sin_consentimiento_no_se_firma(cliente, empresa, otp_fijo):
+def test_sin_firma_dibujada_no_se_firma(cliente, empresa, otp_fijo):
+    # La firma dibujada es el acto expreso de firmar y de consentir: sin ella, no hay firma.
     crear_plantilla(cliente, empresa)
     contrato = crear_contrato(cliente, empresa).json()
     token = token_de(contrato["signing_url"])

@@ -32,7 +32,7 @@ from app.almacenamiento import almacen
 from app.config import ajustes
 from app.db import ahora_utc, obtener_sesion
 from app.dependencias import ip_observada, limitar
-from app.dominio import auditoria, contratos as servicio, webhooks
+from app.dominio import auditoria, contratos as servicio, firma_manuscrita, webhooks
 from app.dominio.contratos import Contexto, ErrorDeNegocio
 from app.dominio.estados import TransicionInvalida
 from app.tareas import despachar_en_linea
@@ -161,6 +161,9 @@ def _base(request: Request, acceso: Acceso) -> dict:
         "parte": acceso.parte,
         "csrf": token_csrf(acceso.sesion_firma),
         "politica": acceso.contrato.politica or {},
+        # El lienzo del navegador usa el mismo tamano que valida el servidor.
+        "lienzo_ancho": firma_manuscrita.ANCHO,
+        "lienzo_alto": firma_manuscrita.ALTO,
     }
 
 
@@ -419,7 +422,7 @@ def firmar(
     request: Request,
     tareas: BackgroundTasks,
     csrf: str = Form(default=""),
-    acepto: str = Form(default=""),
+    firma: str = Form(default=""),
     latitud: str = Form(default=""),
     longitud: str = Form(default=""),
     precision: str = Form(default=""),
@@ -432,8 +435,13 @@ def firmar(
     politica = acceso.contrato.politica or {}
     contexto = _base(request, acceso)
 
-    if acepto != "si":
-        contexto["error"] = "Tienes que aceptar el uso de firma electronica para poder firmar."
+    # La firma dibujada ES el consentimiento: es el acto expreso de firmar, y va
+    # justo debajo de la declaracion de que leyo el contrato y acepta la firma
+    # electronica. Sin dibujo no hay firma.
+    try:
+        trazos_firma = firma_manuscrita.validar(firma)
+    except firma_manuscrita.FirmaInvalida as error:
+        contexto["error"] = str(error)
         return plantillas.TemplateResponse(request, "documento.html", contexto, status_code=400)
 
     if latitud and longitud:
@@ -467,6 +475,7 @@ def firmar(
     auditoria.registrar(
         sesion, tenant_id=acceso.contrato.tenant_id, contrato_id=acceso.contrato.id,
         tipo="CONSENTIMIENTO_ACEPTADO", actor_tipo="FIRMANTE", actor_id=acceso.parte.id,
+        datos={"medio": "firma dibujada", "hash_firma": firma_manuscrita.hash_de(trazos_firma)},
         ip=ip_observada(request), agente=request.headers.get("user-agent"),
     )
 
@@ -478,6 +487,7 @@ def firmar(
             parte=acceso.parte,
             sesion_firma=acceso.sesion_firma,
             consentimiento_en=consentimiento_en,
+            trazos_firma=trazos_firma,
         )
     except ErrorDeNegocio as error:
         sesion.rollback()

@@ -24,15 +24,24 @@
     <input type="hidden" name="latitud" id="latitud">
     <input type="hidden" name="longitud" id="longitud">
     <input type="hidden" name="precision" id="precision">
+    <input type="hidden" name="firma" id="firma">
 
-    <label class="consentimiento">
-      <input type="checkbox" name="acepto" value="si" required>
-      <span>Acepto el uso de firma electronica y declaro haber leido y entendido el contenido
-      integro de este documento. Entiendo que mi firma electronica tiene el mismo valor que
-      mi firma manuscrita.</span>
-    </label>
+    <p class="declaracion">Dibuja tu firma en el recuadro, con el mouse o con el dedo. Al firmar
+    declaro haber leido y entendido el contenido integro de este documento y acepto el uso de
+    firma electronica. Entiendo que mi firma electronica tiene el mismo valor que mi firma
+    manuscrita.</p>
 
-    <button type="submit" id="boton-firmar">Firmar documento</button>
+    <div class="marco-firma" id="marco-firma">
+      <canvas id="lienzo" width="{{ lienzo_ancho }}" height="{{ lienzo_alto }}"
+              role="img" aria-label="Recuadro para dibujar tu firma"></canvas>
+      <span class="linea-firma" id="guia-firma">Firma aqui</span>
+    </div>
+    <div class="fila-firma">
+      <button type="button" class="secundario" id="borrar-firma">Borrar y empezar de nuevo</button>
+      <span id="estado-firma" class="sutil" aria-live="polite"></span>
+    </div>
+
+    <button type="submit" id="boton-firmar" disabled>Firmar documento</button>
   </form>
 
   <details class="rechazo">
@@ -51,29 +60,165 @@
 <script nonce="{{ nonce }}">
   (function () {
     "use strict";
-    var exigeUbicacion = {{ 'true' if politica.requiere_geolocalizacion else 'false' }};
-    if (!exigeUbicacion || !navigator.geolocation) return;
 
+    // Mismo tamano de lienzo que valida el servidor (dominio/firma_manuscrita.py).
+    var ANCHO = {{ lienzo_ancho }}, ALTO = {{ lienzo_alto }};
+    var MAX_TRAZOS = 35, MAX_PUNTOS = 2400;
+    var LARGO_MINIMO = 60, EXTENSION_MINIMA = 40;
+
+    var lienzo = document.getElementById("lienzo");
+    var marco = document.getElementById("marco-firma");
+    var guia = document.getElementById("guia-firma");
     var boton = document.getElementById("boton-firmar");
-    var aviso = document.getElementById("aviso-ubicacion");
-    boton.disabled = true;
+    var estado = document.getElementById("estado-firma");
+    var formulario = document.getElementById("formulario-firma");
+    var ctx = lienzo.getContext("2d");
 
-    navigator.geolocation.getCurrentPosition(
-      function (posicion) {
-        document.getElementById("latitud").value = posicion.coords.latitude;
-        document.getElementById("longitud").value = posicion.coords.longitude;
-        document.getElementById("precision").value = posicion.coords.accuracy;
-        aviso.textContent = "Ubicacion capturada. Ya puedes firmar.";
-        boton.disabled = false;
-      },
-      function () {
-        aviso.textContent =
-          "No se pudo obtener tu ubicacion y este contrato la exige. " +
-          "Permite el acceso en tu navegador y recarga la pagina.";
-        boton.disabled = true;
-      },
-      { enableHighAccuracy: true, timeout: 15000 }
-    );
+    // El dibujo se guarda a mayor resolucion para que no se vea pixelado.
+    var escala = Math.min(3, Math.max(2, window.devicePixelRatio || 1));
+    lienzo.width = ANCHO * escala;
+    lienzo.height = ALTO * escala;
+    ctx.scale(escala, escala);
+    ctx.lineWidth = 2.4;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = "#14151a";
+
+    var trazos = [], actual = null, puntos = 0, aviso = "";
+
+    var exigeUbicacion = {{ 'true' if politica.requiere_geolocalizacion else 'false' }};
+    var ubicacionOk = !exigeUbicacion || !navigator.geolocation;
+
+    // Misma regla que el servidor: un toque suelto o una rayita no es una firma.
+    function medir() {
+      var largo = 0, minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9, validos = 0;
+      trazos.forEach(function (t) {
+        if (t.length < 2) return;
+        validos++;
+        for (var i = 0; i < t.length; i++) {
+          if (i > 0) largo += Math.hypot(t[i][0] - t[i - 1][0], t[i][1] - t[i - 1][1]);
+          minX = Math.min(minX, t[i][0]); maxX = Math.max(maxX, t[i][0]);
+          minY = Math.min(minY, t[i][1]); maxY = Math.max(maxY, t[i][1]);
+        }
+      });
+      return { validos: validos, largo: largo, extension: validos ? Math.max(maxX - minX, maxY - minY) : 0 };
+    }
+
+    function firmaValida() {
+      var m = medir();
+      return m.validos > 0 && m.largo >= LARGO_MINIMO && m.extension >= EXTENSION_MINIMA;
+    }
+
+    function actualizar() {
+      var valida = firmaValida();
+      boton.disabled = !(valida && ubicacionOk);
+      marco.className = "marco-firma" + (trazos.length ? " con-trazo" : "");
+      guia.style.display = trazos.length ? "none" : "";
+      if (aviso) estado.textContent = aviso;
+      else if (!trazos.length) estado.textContent = "Dibuja tu firma para poder firmar.";
+      else if (!valida) estado.textContent = "Sigue dibujando: la firma es muy corta.";
+      else if (!ubicacionOk) estado.textContent = "Falta compartir tu ubicacion.";
+      else estado.textContent = "Listo. Pulsa Firmar documento.";
+    }
+
+    // Convierte la posicion del puntero (mouse, dedo o lapiz) a coordenadas del lienzo.
+    function punto(e) {
+      var r = lienzo.getBoundingClientRect();
+      var x = (e.clientX - r.left) * ANCHO / r.width;
+      var y = (e.clientY - r.top) * ALTO / r.height;
+      return [Math.round(Math.min(Math.max(x, 0), ANCHO) * 10) / 10,
+              Math.round(Math.min(Math.max(y, 0), ALTO) * 10) / 10];
+    }
+
+    function empezar(e) {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      e.preventDefault();
+      if (trazos.length >= MAX_TRAZOS || puntos >= MAX_PUNTOS) {
+        aviso = "La firma es muy larga. Borrala y hazla mas simple.";
+        actualizar();
+        return;
+      }
+      aviso = "";
+      try { lienzo.setPointerCapture(e.pointerId); } catch (_) {}
+      var p = punto(e);
+      actual = [p];
+      trazos.push(actual);
+      puntos++;
+      ctx.beginPath();
+      ctx.moveTo(p[0], p[1]);
+      ctx.lineTo(p[0] + 0.01, p[1]); // un toque deja un punto visible
+      ctx.stroke();
+      actualizar();
+    }
+
+    function mover(e) {
+      if (!actual) return;
+      e.preventDefault();
+      var p = punto(e), u = actual[actual.length - 1];
+      if (Math.hypot(p[0] - u[0], p[1] - u[1]) < 1.2) return; // descarta puntos casi iguales
+      if (puntos >= MAX_PUNTOS) {
+        aviso = "La firma es muy larga. Borrala y hazla mas simple.";
+        actual = null;
+        actualizar();
+        return;
+      }
+      ctx.beginPath();
+      ctx.moveTo(u[0], u[1]);
+      ctx.lineTo(p[0], p[1]);
+      ctx.stroke();
+      actual.push(p);
+      puntos++;
+      actualizar();
+    }
+
+    function terminar() {
+      actual = null;
+      actualizar();
+    }
+
+    lienzo.addEventListener("pointerdown", empezar);
+    lienzo.addEventListener("pointermove", mover);
+    lienzo.addEventListener("pointerup", terminar);
+    lienzo.addEventListener("pointercancel", terminar);
+    lienzo.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+
+    document.getElementById("borrar-firma").addEventListener("click", function () {
+      ctx.clearRect(0, 0, ANCHO, ALTO);
+      trazos = []; actual = null; puntos = 0; aviso = "";
+      actualizar();
+    });
+
+    formulario.addEventListener("submit", function (e) {
+      if (!firmaValida() || !ubicacionOk) { e.preventDefault(); actualizar(); return; }
+      var enviar = trazos.filter(function (t) { return t.length >= 2; });
+      document.getElementById("firma").value =
+        JSON.stringify({ ancho: ANCHO, alto: ALTO, trazos: enviar });
+    });
+
+    // Contratos que exigen ubicacion: el boton espera tambien a que se comparta.
+    if (exigeUbicacion && navigator.geolocation) {
+      var avisoUbicacion = document.getElementById("aviso-ubicacion");
+      navigator.geolocation.getCurrentPosition(
+        function (posicion) {
+          document.getElementById("latitud").value = posicion.coords.latitude;
+          document.getElementById("longitud").value = posicion.coords.longitude;
+          document.getElementById("precision").value = posicion.coords.accuracy;
+          avisoUbicacion.textContent = "Ubicacion capturada. Ya puedes firmar.";
+          ubicacionOk = true;
+          actualizar();
+        },
+        function () {
+          avisoUbicacion.textContent =
+            "No se pudo obtener tu ubicacion y este contrato la exige. " +
+            "Permite el acceso en tu navegador y recarga la pagina.";
+          ubicacionOk = false;
+          actualizar();
+        },
+        { enableHighAccuracy: true, timeout: 15000 }
+      );
+    }
+
+    actualizar();
   })();
 </script>
 {% endblock %}

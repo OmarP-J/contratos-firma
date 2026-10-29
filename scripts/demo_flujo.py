@@ -7,6 +7,7 @@ integrador de verdad mas un firmante humano.
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -16,6 +17,12 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 BASE = "http://127.0.0.1:8000"
+
+# En el portal la firma se dibuja con el mouse o el dedo; aqui se manda un trazo de ejemplo.
+FIRMA = json.dumps({
+    "ancho": 600, "alto": 200,
+    "trazos": [[[60 + i * 12.0, 100 + (35 if i % 2 else -35)] for i in range(40)]],
+})
 
 
 def csrf_de(html: str) -> str:
@@ -74,7 +81,7 @@ def main(client_id: str, client_secret: str) -> None:
     )
     if "no coincide" in verif.text or "vencio" in verif.text:
         raise SystemExit("   el codigo no fue aceptado")
-    navegador.post(f"/firma/{token}/firmar", data={"csrf": csrf_de(verif.text), "acepto": "si"})
+    navegador.post(f"/firma/{token}/firmar", data={"csrf": csrf_de(verif.text), "firma": FIRMA})
     estado = api.get(f"/v1/contratos/{contrato['contract_id']}").json()
     print(f"   estado ahora: {estado['status']}")
 
@@ -88,7 +95,7 @@ def main(client_id: str, client_secret: str) -> None:
         verif = navegador.post(
             f"/firma/{token2}/verificar", data={"csrf": csrf_de(envio.text), "codigo": codigo2}
         )
-        navegador.post(f"/firma/{token2}/firmar", data={"csrf": csrf_de(verif.text), "acepto": "si"})
+        navegador.post(f"/firma/{token2}/firmar", data={"csrf": csrf_de(verif.text), "firma": FIRMA})
 
     paso(5, "Resultado final")
     final = api.get(f"/v1/contratos/{contrato['contract_id']}").json()
